@@ -19,6 +19,17 @@ chmod 755 /root/piku-bootstrap
 
 See the [Piku bootstrap repository](https://github.com/piku/piku-bootstrap) and [Piku install guide](https://piku.github.io/install/).
 
+On this Ubuntu 24.04 image, add explicit network permission to the `uwsgi-core` AppArmor profile before deploying. Without it, the profile's `unconfined` label can lose its network allowance after user-namespace stacking, and Piku's app worker fails with `socket(AF_INET): Permission denied`.
+
+```sh
+cat >/etc/apparmor.d/local/uwsgi-core <<'EOF'
+network inet stream,
+network inet6 stream,
+EOF
+apparmor_parser -r /etc/apparmor.d/uwsgi-core
+systemctl restart uwsgi-piku
+```
+
 Register the GitHub Actions deploy public key with Piku (not root):
 
 ```sh
@@ -54,7 +65,10 @@ The caller workflow `.github/workflows/deploy.yml` runs on pushes to `main` or `
 1. Builds Tailwind CSS and compiles the release executable on GitHub's Ubuntu runner.
 2. Creates a temporary artifact-only Git repository; it does not include Rust source or Cargo files, so Piku uses its generic executable worker and does not invoke Cargo.
 3. Pushes the package to `piku@VPS_HOST:todo` over the pinned SSH connection.
-4. Piku stores the database at `~/.piku/data/todo/todo.db`, listens on its assigned private `PORT`, and routes `todorust.duckdns.org` to the app.
+4. Uses Piku's restricted SSH command to check the app's HTTPS route through loopback on the VPS.
+5. Piku stores the database at `~/.piku/data/todo/todo.db`, listens on its assigned private `PORT`, and routes `todorust.duckdns.org` to the app.
+
+The check validates the app and Piku's local TLS route. It does not verify the external IPv4 route. During this deployment, IPv6 reached this VPS's Nginx/Piku stack, while IPv4 port 80 answered with a separate `Server: Caddy` endpoint and IPv4 TLS failed. IPv4 web access needs the VPS provider's port 80/443 forwarding corrected; the VPS itself has no Caddy process. The app returned HTTP 200 over HTTPS on IPv6 after applying the AppArmor rule above.
 
 Each Piku app gets its own data directory and a separate SQLite-compatible libSQL database file. This is embedded libSQL, not a separate Turso server. Piku runs apps under its `piku` Unix account, so per-app data paths separate normal app data but are not a strong security sandbox between mutually untrusted apps.
 
@@ -74,4 +88,4 @@ Piku references: [GitHub project](https://github.com/piku/piku), [Procfile](http
 
 ## Deployment record
 
-To be completed after the first successful GitHub Actions deployment: record the Actions result, HTTPS health check, and app process status here.
+The first GitHub Actions build and artifact-only Piku push succeeded. The app is running as Piku's `web` process, and its `/healthz` returns HTTP 200 over local HTTPS and public IPv6. The initial public IPv4 health check failed because that route reaches a separate Caddy endpoint. The workflow now checks the app's local HTTPS route through Piku's restricted SSH command; rerun it after pushing this change to confirm CI is green.
