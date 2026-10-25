@@ -94,3 +94,8 @@ jobs:
           git remote add piku "piku@${VPS_HOST}:${APP_NAME}"
           export GIT_SSH_COMMAND="ssh -p ${VPS_SSH_PORT} -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           git push --force piku HEAD:main
+
+      - name: Verify public HTTPS health
+        env:
+          APP_DOMAIN: ${{ inputs.domain }}
+        run: curl --fail --show-error --silent --retry 12 --retry-delay 5 --retry-connrefused "https://$APP_DOMAIN/healthz"
