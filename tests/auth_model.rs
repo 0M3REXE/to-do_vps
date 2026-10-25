@@ -7,7 +7,7 @@
 mod common;
 
 use common::{POLICY_MAX, POLICY_MIN, db};
-use practice::auth::{create_user, password, user_id_by_email};
+use todo::auth::{create_user, password, user_id_by_email};
 
 #[tokio::test]
 async fn creating_an_account_gives_it_an_id_and_a_timestamp() {
@@ -22,7 +22,7 @@ async fn creating_an_account_gives_it_an_id_and_a_timestamp() {
     assert!(user.id > 0);
     assert_eq!(user.email, "new@example.com");
 
-    let created: i64 = practice::db::scalar_i64(
+    let created: i64 = todo::db::scalar_i64(
         &pool,
         "select count(*) from users where created_at is not null",
         vec![],
@@ -116,11 +116,11 @@ async fn the_password_is_never_stored_in_the_clear() {
         .unwrap()
         .expect("signup");
 
-    let stored: String = practice::db::query_all(
+    let stored: String = todo::db::query_all(
         &pool,
         "select password_hash from users",
         vec![],
-        |row| practice::db::rs(row, 0),
+        |row| todo::db::rs(row, 0),
     )
     .await
     .unwrap()

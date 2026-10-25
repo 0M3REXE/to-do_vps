@@ -1,6 +1,6 @@
 //! # The executable — wiring only
 //!
-//! Real work lives in the `practice` library. This loads `.env`, sets up
+//! Real work lives in the `todo` library. This loads `.env`, sets up
 //! tracing, opens the database, applies migrations, builds the router, and
 //! serves. The router itself comes from `app::build_app` so that the test suite
 //! drives the same routes, session layer and login guard that `cargo run` does.
@@ -10,7 +10,7 @@
 //! The session and auth layers are already inside `build_app`, so they sit
 //! *below* everything applied here — see the diagram in `src/app.rs`.
 
-use practice::{app, db};
+use todo::{app, db};
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -93,7 +93,7 @@ async fn main() {
 /// Migrations are embedded (`src/db.rs`), so a deploy needs no separate
 /// migration step. A failure here is fatal: serving reads against a schema the
 /// app does not recognise would fail later, less clearly.
-async fn connect_db() -> practice::db::Db {
+async fn connect_db() -> todo::db::Db {
     match db::open_from_env().await {
         Ok(db) => {
             tracing::info!("database ready");

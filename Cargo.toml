@@ -1,8 +1,8 @@
 [package]
-name = "practice"
+name = "todo"
 version = "0.1.0"
 edition = "2024"
-default-run = "practice"
+default-run = "todo"
 
 # The library is what `cargo test` drives; `main.rs` is the server that both
 # `cargo run` and the Docker image start.
@@ -10,7 +10,7 @@ default-run = "practice"
 path = "src/lib.rs"
 
 [[bin]]
-name = "practice"
+name = "todo"
 path = "src/main.rs"
 
 [dependencies]

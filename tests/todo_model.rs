@@ -11,8 +11,8 @@
 mod common;
 
 use common::{count, db, done_of, ensure_user, ids, only_id, seed, text_of, user_id};
-use practice::db::{pi, ps};
-use practice::todo::{MAX_TEXT_LEN, add, flip_done, open_count, remove, sorted};
+use todo::db::{pi, ps};
+use todo::todo::{MAX_TEXT_LEN, add, flip_done, open_count, remove, sorted};
 
 #[tokio::test]
 async fn add_assigns_incrementing_ids_starting_at_one() {
@@ -71,7 +71,7 @@ async fn the_length_limit_is_measured_after_trimming() {
     let padded = format!("{}   ", "a".repeat(MAX_TEXT_LEN));
     assert!(add(&pool, me, &padded).await.unwrap());
 
-    let len: i64 = practice::db::scalar_i64(
+    let len: i64 = todo::db::scalar_i64(
         &pool,
         "select length(text) from todos",
         vec![],
@@ -88,7 +88,7 @@ async fn the_database_rejects_what_the_handler_rejects() {
     let pool = db().await;
     let me = user_id(&pool).await;
 
-    practice::db::execute(
+    todo::db::execute(
         &pool,
         "insert into todos (text, user_id) values (?1, ?2)",
         vec![ps(String::new()), pi(me)],
@@ -96,10 +96,10 @@ async fn the_database_rejects_what_the_handler_rejects() {
     .await
     .expect_err("the CHECK constraint must reject blank text directly");
 
-    practice::db::execute(
+    todo::db::execute(
         &pool,
         "insert into todos (text, user_id) values (?1, ?2)",
-        vec![practice::db::ps("a".repeat(MAX_TEXT_LEN + 1)), pi(me)],
+        vec![todo::db::ps("a".repeat(MAX_TEXT_LEN + 1)), pi(me)],
     )
     .await
     .expect_err("the CHECK constraint must reject over-long text directly");
@@ -200,11 +200,11 @@ async fn sorted_puts_completed_below_active_within_order() {
     flip_done(&pool, me, all[0]).await.unwrap();
     flip_done(&pool, me, all[1]).await.unwrap();
 
-    let order: Vec<String> = practice::db::query_all(
+    let order: Vec<String> = todo::db::query_all(
         &pool,
         "select text from todos order by done asc, id asc",
         vec![],
-        |row| practice::db::rs(row, 0),
+        |row| todo::db::rs(row, 0),
     )
     .await
     .unwrap();
@@ -297,11 +297,11 @@ async fn sql_injection_payloads_are_stored_as_text() {
 
     assert_eq!(count(&pool).await, payloads.len() as i64);
 
-    let stored: Vec<String> = practice::db::query_all(
+    let stored: Vec<String> = todo::db::query_all(
         &pool,
         "select text from todos order by id",
         vec![],
-        |row| practice::db::rs(row, 0),
+        |row| todo::db::rs(row, 0),
     )
     .await
     .unwrap();

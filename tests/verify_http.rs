@@ -9,7 +9,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{Client, db, only_id, seed};
-use practice::auth::safe_next;
+use todo::auth::safe_next;
 
 const THIS_HOST: &str = "http://localhost:3000";
 const OTHER_HOST: &str = "http://evil.example";
@@ -113,7 +113,7 @@ async fn a_foreign_origin_post_is_refused_with_a_403() {
 /// refused request never reached it.
 #[tokio::test]
 async fn a_blocked_post_lets_no_state_change_happen() {
-    use practice::db::pi;
+    use todo::db::pi;
 
     let database = db().await;
     seed(&database, &["buy milk"]).await;
@@ -130,11 +130,11 @@ async fn a_blocked_post_lets_no_state_change_happen() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    let still_there: String = practice::db::opt_query(
+    let still_there: String = todo::db::opt_query(
         &database,
         "select text from todos where id = ?1",
         vec![pi(id)],
-        |row| practice::db::rs(row, 0),
+        |row| todo::db::rs(row, 0),
     )
     .await
     .unwrap()

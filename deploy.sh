@@ -1,38 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Build and roll the app: regenerate the CSS when Node is available, compile
-# the release binary, install it, restart the service, and wait for a real
-# health response. Boot runs the embedded migrations, so a healthy answer also
-# proves the app can reach sqld.
+# Install a prebuilt release binary, restart the service, and check health.
+# Build on GitHub Actions or another matching Linux x86_64 machine, never here.
 #
 # Run from the repo root as root:
 #
-#     sudo ./deploy.sh
+#     sudo ./deploy.sh /tmp/todo.new
 cd "$(dirname "$0")"
 
 fail() { echo "deploy: $*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || fail "run as root: sudo ./deploy.sh"
+[ "$(id -u)" -eq 0 ] || fail "run as root: sudo ./deploy.sh /path/to/prebuilt-todo"
+[ "$#" -eq 1 ] || fail "usage: sudo ./deploy.sh /path/to/prebuilt-todo"
+[ -s "$1" ] || fail "binary not found: $1"
 [ -f .env ] || fail "no .env here — cp .env.example .env first"
-[ -f /etc/systemd/system/practice.service ] || fail "units missing — run deploy/setup.sh first"
+[ -f /etc/systemd/system/todo.service ] || fail "units missing — run deploy/setup.sh first"
 
-# rustup's cargo is not on root's default PATH.
-if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
-command -v cargo >/dev/null 2>&1 || fail "cargo not found — run deploy/setup.sh first"
+install -m 755 "$1" /usr/local/bin/todo
 
-# static/app.css is include_str!-ed at compile time, so it must exist and be
-# current. Without Node it must have been built and committed elsewhere.
-if command -v npm >/dev/null 2>&1; then
-    npm ci --no-audit --no-fund
-    npm run css:build
-elif [ ! -s static/app.css ]; then
-    fail "static/app.css is missing and npm is not installed — install Node or commit a built CSS"
-fi
-
-cargo build --release --locked
-install -m 755 target/release/practice /usr/local/bin/practice
-
-systemctl restart practice
+systemctl restart todo
 
 echo "waiting for the app..."
 for _ in $(seq 1 30); do
@@ -44,5 +30,5 @@ for _ in $(seq 1 30); do
 done
 
 echo "the app did not answer within 60s; recent logs:" >&2
-journalctl -u practice -n 50 --no-pager >&2
+journalctl -u todo -n 50 --no-pager >&2
 exit 1

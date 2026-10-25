@@ -9,11 +9,11 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{Client, db, make_user};
-use practice::auth::password;
-use practice::db::{pi, rs};
+use todo::auth::password;
+use todo::db::{pi, rs};
 
 /// Two independent sessions on the same freshly created account, plus its id.
-async fn two_sessions(database: &practice::db::Db, email: &str) -> (Client, Client, i64) {
+async fn two_sessions(database: &todo::db::Db, email: &str) -> (Client, Client, i64) {
     let uid = make_user(database, email).await;
     let a = Client::for_email(database, email).await;
     let b = Client::for_email(database, email).await;
@@ -154,7 +154,7 @@ async fn a_successful_change_logs_out_everywhere_but_here() {
     assert!(destination.contains("/account/password?changed=1"));
 
     // The stored hash now verifies against the new password.
-    let stored_hash: String = practice::db::opt_query(
+    let stored_hash: String = todo::db::opt_query(
         &database,
         "select password_hash from users where id = ?1",
         vec![pi(uid)],

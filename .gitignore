@@ -4,6 +4,7 @@
 .env
 /.sqlx
 /.freebuff
+/todo.db
 /practice.db
 /docs
 /.ssh/

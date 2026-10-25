@@ -1,10 +1,10 @@
-# Practice
+# To-do
 
-A small, server-rendered todo app built with Rust, Axum, Askama, HTMX 4, and libSQL. Accounts can sign up, sign in, change their password, and end other sessions. Each todo is scoped to its owner.
+A small, server-rendered todo app built with Rust, Axum, Askama, HTMX, and libSQL. Accounts can sign up, sign in, change their password, and end other sessions. Each todo is scoped to its owner.
 
 ## Run locally
 
-Rust is required. The app defaults to a local `practice.db` file, `127.0.0.1:3000`, and secure cookies. For plain HTTP development, set:
+Install Rust. The app defaults to a local `todo.db` file, `127.0.0.1:3000`, and secure cookies. For plain HTTP development:
 
 ```powershell
 $env:SESSION_SECURE = "false"
@@ -12,11 +12,11 @@ $env:APP_ALLOWED_HOST = "127.0.0.1:3000,localhost:3000"
 cargo run
 ```
 
-The development database is created and migrated automatically. To use a libSQL server instead (Turso cloud or a self-hosted sqld), set `DATABASE_URL` to its `libsql://`/`http(s)://` URL and `DATABASE_AUTH_TOKEN` to its token if it requires one. Never commit either secret.
+The development database is created and migrated automatically. To use a libSQL server (Turso Cloud or self-hosted `sqld`), set `DATABASE_URL` and, if required, `DATABASE_AUTH_TOKEN`. Never commit database tokens or `.env`.
 
 ## Frontend assets
 
-Askama compiles templates into the Rust binary. Tailwind builds `static/app.css`, which the server embeds at compile time. After changing a template or style, rebuild the CSS and restart/rebuild the app:
+Askama compiles templates into the executable. Tailwind builds `static/app.css`, which is embedded at compile time. After changing templates or styles:
 
 ```sh
 npm ci
@@ -24,58 +24,52 @@ npm run css:build
 cargo run
 ```
 
-Node is build-time only: it produces `static/app.css`, which the binary embeds. The running server never needs Node either.
+Commit the updated `static/app.css` so deploys can use the checked-in asset. Node is only needed to build CSS; the server does not need Node.
 
-Use `npm run css:watch` while editing styles. The vendored `static/vendor/htmx.min.js` is pinned to 4.0.0.
+## Deploy to a 1 GB VPS
 
-## Deploy to a VPS
+The VPS runs three systemd services: `sqld` (self-hosted libSQL/Turso on `127.0.0.1:8080`), `todo` (the app on `127.0.0.1:3000`), and Caddy (HTTPS on ports 80/443). The existing `practice` system account and `/var/lib/practice` database directory are retained so an existing database survives the app rename. Keep port 8080 private; `sqld` has no authentication in this setup.
 
-Bare metal — no Docker. Three systemd services on the box:
+**The VPS does not compile the Rust project.** GitHub Actions builds the Linux executable and transfers it to the VPS. This keeps Rust, Node, and build dependencies off the 1 GB machine. The included workflow targets x86_64 Ubuntu; use a matching Linux build runner if the VPS is ARM.
 
-- `sqld.service` — **Turso's libSQL server, self-hosted** from the official
-  prebuilt binary, listening on `127.0.0.1:8080` only (auth off, loopback
-  only). Data lives in `/var/lib/practice/data.sqld`.
-- `practice.service` — the app on `127.0.0.1:3000`; systemd loads the repo's
-  `.env` as its environment. Migrations run at startup, so there is no
-  separate migration step.
-- `caddy` — the only public ports (80/443): automatic HTTPS for `DOMAIN`,
-  forwarding to the app.
+### First deployment
 
-Target is a Debian/Ubuntu VPS (apt). Point your domain's A record at it first.
+1. Get a hostname that points at the VPS. You do not need to buy a domain: at [DuckDNS](https://www.duckdns.org/), sign in, enter an available name such as `mytodo`, add it, and set its IP to the VPS's public IPv4 address from your provider dashboard. The full hostname will be `mytodo.duckdns.org`. Since a VPS usually keeps the same IP, no DuckDNS updater or token is needed. Put that hostname in `.env` as `DOMAIN=mytodo.duckdns.org`. Caddy can then obtain a browser-trusted HTTPS certificate when ports 80 and 443 are open. [Caddy automatic HTTPS requirements](https://caddyserver.com/docs/automatic-https).
+2. On the VPS, install Debian/Ubuntu and clone the repository to `/opt/to-do`:
+
+   ```sh
+   git clone <repo-url> /opt/to-do
+   cd /opt/to-do
+   cp .env.example .env
+   nano .env   # set DOMAIN to the real domain
+   sudo ./deploy/setup.sh
+   ```
+
+   Setup installs the `sqld` prebuilt binary, Caddy, and systemd units. It does not install Rust or compile the app. `deploy/setup.sh` is safe to re-run.
+3. In GitHub repository settings, add Actions secrets `VPS_HOST`, `VPS_SSH_PORT`, `VPS_USER`, `VPS_SSH_KEY`, and `VPS_KNOWN_HOSTS`. Store the private SSH key in `VPS_SSH_KEY`. Generate known-hosts data with `ssh-keyscan -p <port> <host>`, verify the fingerprint against the VPS provider console, then save it as `VPS_KNOWN_HOSTS`. The SSH user needs passwordless sudo for only `install -m 755 /tmp/todo.new /usr/local/bin/todo`, `systemctl restart todo`, and `journalctl -u todo -n 50 --no-pager`. Keep `.env` on the VPS; the workflow never uploads it.
+4. Push to `main` or `master`, or run the **deploy** workflow manually from Actions. The workflow builds CSS and the release executable on GitHub, copies the executable, restarts `todo`, and checks `/healthz`.
+
+Subsequent pushes deploy automatically. To deploy manually, build the release executable on a matching Linux x86_64 host (`npm ci && npm run css:build && cargo build --release --locked`), then copy it and install it from the repository directory:
 
 ```sh
-git clone <repo> /opt/practice && cd /opt/practice
-cp .env.example .env        # set DOMAIN; SESSION_SECRET optional but recommended
-sudo ./deploy/setup.sh      # one-time: swap, rustup, sqld binary, Caddy, systemd units
-sudo ./deploy.sh            # build + install + restart + health check
+scp target/release/todo <user>@<vps>:/tmp/todo.new
+ssh <user>@<vps> 'cd /opt/to-do && sudo ./deploy.sh /tmp/todo.new'
 ```
 
-Updates are the last two steps again: `git pull && sudo ./deploy.sh`.
-`deploy.sh` compiles on the VPS (a 1 GB box gets swap from `setup.sh`); it
-rebuilds the CSS when npm exists and otherwise compiles with the committed
-`static/app.css`.
+### Operations
 
-Day-to-day:
-
-- Logs: `journalctl -u practice -f` (likewise `sqld`, `caddy`)
-- Restart: `sudo systemctl restart practice`
-- Backups — stop the app and archive the data directory:
+- Logs: `journalctl -u todo -f` (also `sqld` and `caddy`)
+- Restart: `sudo systemctl restart todo`
+- Back up the database while stopped:
 
   ```sh
-  sudo systemctl stop practice
-  sudo tar czf /root/practice-db-$(date +%F).tar.gz -C /var/lib/practice data.sqld
-  sudo systemctl start practice
+  sudo systemctl stop todo sqld
+  sudo tar czf /root/todo-db-$(date +%F).tar.gz -C /var/lib practice
+  sudo systemctl start sqld todo
   ```
 
-Notes:
-
-- After changing templates or styles, rebuild the CSS and commit it (or have
-  Node on the VPS): `npm ci && npm run css:build`.
-- Never expose port 8080 — sqld has no authentication.
-- `SESSION_SECURE` defaults to `true` (browsers talk HTTPS to Caddy); set it
-  to `false` in `.env` only for a plain-HTTP localhost smoke test.
-- Auth rate limiting keys on `X-Forwarded-For`, which Caddy appends — it is
-  active in deployment and stays off for local development.
+- Set `SESSION_SECRET` in `.env` with `openssl rand -hex 32` before production use. Keep `.env` private; systemd loads it for the app.
+- `SESSION_SECURE=true` is correct behind Caddy. Auth rate limiting uses Caddy's forwarded client address.
 
 ## Account limitations
 
@@ -90,4 +84,3 @@ The app does not send email. Email verification and password reset are not avail
 - `templates/` and `static/` — server-rendered UI and browser assets
 - `Caddyfile`, `deploy/`, `deploy.sh` — VPS deployment (Caddy, sqld, systemd)
 - `tests/` — router and data-layer coverage
-- `AUDIT_REMEDIATION_PLAN.md` — audit findings and remaining roadmap

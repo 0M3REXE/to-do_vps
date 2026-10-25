@@ -70,7 +70,7 @@ pub fn parse_ts(raw: &str) -> Result<OffsetDateTime, Error> {
 /// is fatal in the callers: serving against half a schema would fail later,
 /// less clearly.
 pub async fn open_from_env() -> Result<Db, Error> {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "file:practice.db".to_owned());
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "file:todo.db".to_owned());
 
     let db = match url.as_str() {
         remote

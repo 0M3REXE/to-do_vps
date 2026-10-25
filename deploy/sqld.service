@@ -3,7 +3,8 @@
 #
 # Loopback only: the app is the sole client, authentication is off, and an
 # sqld reachable from the internet would be an open database. Data lands in
-# $WorkingDirectory/data.sqld (owned by the practice user).
+# $WorkingDirectory/data.sqld (owned by the practice service account, retained
+# so renaming the app does not move or orphan an existing database).
 
 [Unit]
 Description=libSQL server (sqld) — the local Turso database

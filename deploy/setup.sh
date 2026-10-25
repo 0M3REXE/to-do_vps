@@ -4,16 +4,16 @@ set -euo pipefail
 #
 #     sudo ./deploy/setup.sh
 #
-# Installs what the stack needs and no more: the service user, Rust (to build
-# the app on this box), the official libsql-server (`sqld`) binary, Caddy, and
+# Installs what the stack needs and no more: the service user, the official
+# libsql-server (`sqld`) binary, Caddy, and
 # the two systemd units. Idempotent — re-running is safe.
 #
-# It does not build or start the app; ./deploy.sh does that.
+# It does not build or start the app; deploy.sh installs its prebuilt binary.
 #
 # Assumes a Debian/Ubuntu VPS (apt). No Docker involved anywhere.
 
 SQLD_VERSION=0.24.32
-SERVICE_USER=practice
+SERVICE_USER=practice # Keep the existing service account and database path across app renames.
 DATA_DIR=/var/lib/practice
 
 cd "$(dirname "$0")/.."
@@ -34,29 +34,14 @@ DOMAIN="$(set -a; . ./.env; set +a; printf '%s' "${DOMAIN:-}")"
 step "packages"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-    apt-transport-https build-essential ca-certificates curl \
-    debian-archive-keyring debian-keyring git gnupg pkg-config unzip xz-utils
-
-step "swap (a 1 GB VPS OOMs a release build without it)"
-if [ "$(swapon --show --noheadings | wc -l)" -eq 0 ]; then
-    fallocate -l 2G /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile >/dev/null
-    swapon /swapfile
-    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-fi
+    apt-transport-https ca-certificates curl \
+    debian-archive-keyring debian-keyring gnupg unzip xz-utils
 
 step "service user and data directory"
 id -u "$SERVICE_USER" >/dev/null 2>&1 || \
     useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 mkdir -p "$DATA_DIR"
 chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
-
-step "rust (builds the app on this box)"
-if ! command -v cargo >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --profile minimal --default-toolchain stable
-fi
 
 step "libsql-server (sqld) ${SQLD_VERSION}"
 case "$(uname -m)" in
@@ -85,15 +70,23 @@ step "Caddyfile for ${DOMAIN}"
 sed "s/{\$DOMAIN}/${DOMAIN}/g" Caddyfile > /etc/caddy/Caddyfile
 
 step "systemd units"
-# practice.service embeds the repo's real path; @APP_DIR@ is the placeholder.
-sed "s|@APP_DIR@|${APP_DIR}|g" deploy/practice.service > /etc/systemd/system/practice.service
+# todo.service embeds the repo's real path; @APP_DIR@ is the placeholder.
+sed "s|@APP_DIR@|${APP_DIR}|g" deploy/todo.service > /etc/systemd/system/todo.service
 install -m 644 deploy/sqld.service /etc/systemd/system/sqld.service
 systemctl daemon-reload
 systemctl enable --now sqld.service
-systemctl enable practice.service       # started by ./deploy.sh once built
+if [ -f /etc/systemd/system/practice.service ]; then
+    if systemctl is-active --quiet practice.service; then
+        systemctl stop practice.service
+    fi
+    systemctl disable practice.service || true
+    rm -f /etc/systemd/system/practice.service
+fi
+systemctl daemon-reload
+systemctl enable todo.service           # started by deploy.sh after binary install
 systemctl restart caddy.service
 
 step "done — services so far:"
-systemctl is-enabled sqld.service caddy.service practice.service
+systemctl is-enabled sqld.service caddy.service todo.service
 echo
-echo "Next: sudo ./deploy.sh"
+echo "Next: install a prebuilt Linux binary with sudo ./deploy.sh /path/to/todo"

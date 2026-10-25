@@ -140,7 +140,7 @@ async fn signup_refuses_a_mismatched_confirmation() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("do not match"));
     assert!(
-        practice::auth::user_id_by_email(&database, "new@example.com")
+        todo::auth::user_id_by_email(&database, "new@example.com")
             .await
             .expect("lookup")
             .is_none(),
@@ -168,7 +168,7 @@ async fn signup_refuses_a_password_below_the_minimum() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("at least 8"));
     assert!(
-        practice::auth::user_id_by_email(&database, "new@example.com")
+        todo::auth::user_id_by_email(&database, "new@example.com")
             .await
             .expect("lookup")
             .is_none()
@@ -216,11 +216,11 @@ async fn signup_normalises_the_email() {
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
 
-    let stored: String = practice::db::query_all(
+    let stored: String = todo::db::query_all(
         &database,
         "select email from users",
         vec![],
-        |row| practice::db::rs(row, 0),
+        |row| todo::db::rs(row, 0),
     )
     .await
     .unwrap()
@@ -347,7 +347,7 @@ async fn the_next_parameter_reaches_the_form() {
 
 #[tokio::test]
 async fn a_foreign_next_value_never_reaches_the_redirect() {
-    use practice::auth::safe_next;
+    use todo::auth::safe_next;
 
     assert_eq!(safe_next("//evil.example"), "/");
     assert_eq!(safe_next("/\\evil.example"), "/");
@@ -397,14 +397,14 @@ async fn a_get_cannot_log_you_out() {
 
 #[tokio::test]
 async fn the_session_row_dies_with_the_logout() {
-    use practice::db::pi;
+    use todo::db::pi;
 
     let database = db().await;
     let uid = ensure_user(&database, TEST_EMAIL).await;
     let mut client = Client::for_email(&database, TEST_EMAIL).await;
 
-    let count = async |database: &practice::db::Db| -> i64 {
-        practice::db::scalar_i64(
+    let count = async |database: &todo::db::Db| -> i64 {
+        todo::db::scalar_i64(
             database,
             "select count(*) from sessions where user_id = ?1",
             vec![pi(uid)],

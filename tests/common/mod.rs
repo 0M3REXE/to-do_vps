@@ -23,7 +23,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{HeaderMap, Request, StatusCode, header},
 };
-use practice::{
+use todo::{
     AppConfig,
     auth::{MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, create_user, password, user_id_by_email},
     db,
@@ -55,7 +55,7 @@ pub async fn db() -> db::Db {
 /// Every test gets a router with auth wired in, so tests exercise real sessions
 /// rather than a stand-in for them.
 pub fn router(database: &db::Db, config: AppConfig) -> Router {
-    practice::app::build_app(database.clone(), config)
+    todo::app::build_app(database.clone(), config)
 }
 
 /// The default wiring, for tests that use the default configuration.

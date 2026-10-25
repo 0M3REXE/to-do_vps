@@ -1,4 +1,4 @@
-# The app itself. Installed to /etc/systemd/system/practice.service by
+# The app itself. Installed to /etc/systemd/system/todo.service by
 # deploy/setup.sh, which replaces @APP_DIR@ with the repository's real path.
 #
 # .env is the source of truth: systemd loads it before the process starts, so
@@ -6,7 +6,7 @@
 # the binary's own dotenv loader runs.
 
 [Unit]
-Description=Practice todo app (Axum + libSQL)
+Description=To-do app (Axum + libSQL)
 After=network-online.target sqld.service
 Wants=network-online.target
 Wants=sqld.service
@@ -17,7 +17,7 @@ User=practice
 Group=practice
 WorkingDirectory=@APP_DIR@
 EnvironmentFile=@APP_DIR@/.env
-ExecStart=/usr/local/bin/practice
+ExecStart=/usr/local/bin/todo
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
