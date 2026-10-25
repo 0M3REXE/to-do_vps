@@ -1,0 +1,77 @@
+# CI/CD: build on GitHub, ship the binary to the VPS over SSH.
+#
+# The VPS never needs Rust or Node — runners are Ubuntu x86_64 like the box,
+# so the release binary runs there as-is (Ubuntu 24.04 on both sides).
+#
+# One-time setup, done by hand before the first run (never by this file):
+#   1. The deploy PUBLIC key is in /root/.ssh/authorized_keys on the VPS.
+#   2. Repo secrets exist: VPS_HOST, VPS_SSH_PORT, VPS_USER, VPS_SSH_KEY
+#      (VPS_SSH_KEY is the private half, contents of .ssh/deploy_key).
+#   3. deploy/setup.sh has already been run on the VPS (sqld, caddy, units).
+#
+# Tests are not a gate here yet: the suite has 4 pre-existing failures in
+# verify_origin (the CSRF middleware is a stub). Add `cargo test` once fixed.
+
+name: deploy
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # static/app.css is include_str!-ed at compile time, so it must be
+      # generated before cargo runs.
+      - name: Build CSS
+        run: |
+          npm ci
+          npm run css:build
+
+      # The runner already ships rustup + stable Rust.
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # TOFU on first run: the host key is not pinned yet. Optional hardening:
+          # run `ssh-keyscan -p $VPS_SSH_PORT $VPS_HOST` locally once and store
+          # the output as a VPS_KNOWN_HOSTS secret, then append that instead.
+          ssh-keyscan -p "$VPS_SSH_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          SSH_OPTS=(-p "$VPS_SSH_PORT" -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes)
+          scp "${SSH_OPTS[@]}" target/release/practice "$VPS_USER@$VPS_HOST:/tmp/practice.new"
+          ssh "${SSH_OPTS[@]}" "$VPS_USER@$VPS_HOST" '
+            set -e
+            install -m 755 /tmp/practice.new /usr/local/bin/practice
+            rm -f /tmp/practice.new
+            systemctl restart practice
+            echo "waiting for the app..."
+            for i in $(seq 1 30); do
+              if curl -fsS --max-time 2 http://127.0.0.1:3000/healthz >/dev/null 2>&1; then
+                echo "healthy"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "app did not become healthy within 60s; recent logs:" >&2
+            journalctl -u practice -n 50 --no-pager >&2
+            exit 1
+          '

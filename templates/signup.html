@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Create an account · Todo List</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap">
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="apple-touch-icon" href="/static/icons/icon-180x180.png">
+    <meta name="theme-color" content="#d4a033">
+<script>// Applies the saved theme before the stylesheet paints.
+//
+// Inlined (allow-listed by a script-src hash) rather than served as a file
+// because this is code on the critical path: it must run before the first
+// paint so dark-mode visitors never see a light flash.
+(function () {
+  try {
+    var theme = localStorage.getItem('todo-theme');
+    if (theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (_) { /* Storage disabled: the light default below is fine. */ }
+})();</script>
+<script src="/static/vendor/alpine.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body x-data="app" class="page min-h-screen bg-[var(--paper)] text-[var(--ink)] antialiased">
+    <a href="#main-content" class="skip-link">Skip to signup form</a>
+    <header class="shell"><div class="header">
+        {% include "brand.html" %}
+        {% include "theme_toggle.html" %}
+    </div></header>
+    <main id="main-content" class="page__main"><div class="shell">
+        <section class="auth card">
+            <a class="auth-back" href="/login">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5-7 7 7 7M7 12h13"/></svg>
+                Back to log in
+            </a>
+            <h1 class="auth__title">Create an account</h1>
+            {% if let Some(message) = error %}<div class="alert alert--danger" role="alert">{{ message }}</div>{% endif %}
+            <form method="post" action="/signup">
+                <div class="field"><label class="field__label" for="email">Email</label><input class="input" type="email" id="email" name="email" autocomplete="username" value="{{ email }}" required></div>
+                <div class="field"><label class="field__label" for="password">Password</label><div class="input-group">
+                    <input class="input" type="password" id="password" name="password" autocomplete="new-password" minlength="8" required>
+                    <button class="input-group__toggle" type="button" @click="togglePasswords($event)" aria-pressed="false">Show</button>
+                </div><p class="field__hint">At least 8 characters.</p></div>
+                <div class="field"><label class="field__label" for="password_confirm">Confirm password</label><input class="input" type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required></div>
+                <button class="btn btn--primary btn--full" type="submit">Sign up</button>
+            </form>
+            <p class="auth__footer"><a href="/login">Already have an account? Log in</a></p>
+        </section>
+    </div></main>
+</body>
+</html>

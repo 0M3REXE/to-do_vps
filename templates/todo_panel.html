@@ -1,0 +1,29 @@
+<div id="todo-panel" class="todo-panel card">
+    <div class="todo-search">
+        <input id="todo-search" class="input" type="search" name="search" placeholder="Search tasks…" autocomplete="off" aria-label="Search todos" x-ref="search" @input="onSearchInput()">
+        <button type="button" class="todo-search__clear" data-clear-search aria-label="Clear search" title="Clear search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+    </div>
+    <form class="todo-add" hx-post="/app/todos" hx-target="#todo-panel" hx-swap="outerHTML">
+        <div class="todo-add__field">
+            <label class="sr-only" for="todo-text">Add a todo</label>
+            <input
+                id="todo-text"
+                class="todo-input input"
+                type="text"
+                name="text"
+                placeholder="What needs doing?"
+                data-maxlength="280"
+                x-ref="newTodo"
+                aria-describedby="todo-text-hint"
+                autocomplete="off"
+                required
+            >
+            <p id="todo-text-hint" class="field__hint">Up to 280 characters.</p>
+        </div>
+        <button type="submit" class="todo-submit btn btn--primary" hx-disabled-elt="this">Add task</button>
+    </form>
+{% include "todo_list.html" %}
+    <p id="todo-count" class="todo-count text-xs text-[var(--ink-muted)]" aria-live="polite">{{ open_count }} open</p>
+</div>

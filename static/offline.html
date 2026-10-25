@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#d4a033">
+    <title>You're offline · Todo List</title>
+    <script>// Applies the saved theme before the stylesheet paints.
+//
+// Inlined (allow-listed by a script-src hash) rather than served as a file
+// because this is code on the critical path: it must run before the first
+// paint so dark-mode visitors never see a light flash.
+(function () {
+  try {
+    var theme = localStorage.getItem('todo-theme');
+    if (theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (_) { /* Storage disabled: the light default below is fine. */ }
+})();</script>
+
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="page">
+    <main class="page__main offline-main">
+        <div class="shell offline-card">
+            <p class="offline-eyebrow">Todo List</p>
+            <h1>You're offline</h1>
+            <p class="offline-copy">Reconnect to the internet to open and update your tasks. Your account data stays private and is never stored in this offline screen.</p>
+            <a class="btn btn--primary" href="/app">Try again</a>
+        </div>
+    </main>
+</body>
+</html>
+

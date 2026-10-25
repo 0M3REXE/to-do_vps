@@ -1,0 +1,9 @@
+/target
+/node_modules
+/.superpowers
+.env
+/.sqlx
+/.freebuff
+/practice.db
+/docs
+/.ssh/

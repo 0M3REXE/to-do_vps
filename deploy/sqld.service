@@ -1,0 +1,27 @@
+# Turso's libSQL server, self-hosted. Installed to
+# /etc/systemd/system/sqld.service by deploy/setup.sh.
+#
+# Loopback only: the app is the sole client, authentication is off, and an
+# sqld reachable from the internet would be an open database. Data lands in
+# $WorkingDirectory/data.sqld (owned by the practice user).
+
+[Unit]
+Description=libSQL server (sqld) — the local Turso database
+After=network.target
+
+[Service]
+Type=simple
+User=practice
+Group=practice
+WorkingDirectory=/var/lib/practice
+Environment=SQLD_HTTP_LISTEN_ADDR=127.0.0.1:8080
+ExecStart=/usr/local/bin/sqld
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

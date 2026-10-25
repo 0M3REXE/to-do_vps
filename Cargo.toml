@@ -1,0 +1,43 @@
+[package]
+name = "practice"
+version = "0.1.0"
+edition = "2024"
+default-run = "practice"
+
+# The library is what `cargo test` drives; `main.rs` is the server that both
+# `cargo run` and the Docker image start.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "practice"
+path = "src/main.rs"
+
+[dependencies]
+askama = "0.16.0"
+async-trait = "0.1.92"
+axum = "0.8.9"
+axum-login = "0.18.0"
+dotenvy = "0.15"
+libsql = { version = "0.10.0", default-features = false, features = ["core", "remote", "tls"] }
+password-auth = "1.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11"
+time = "0.3.55"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "time"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7.0", features = ["trace", "compression-gzip", "set-header", "timeout", "catch-panic"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tower-sessions = { version = "0.14.0", features = ["signed"] }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 16
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = 1
