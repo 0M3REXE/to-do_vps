@@ -20,7 +20,11 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let addr = std::env::var("ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+    let addr = std::env::var("ADDR").unwrap_or_else(|_| {
+        let host = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_owned());
+        let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_owned());
+        format!("{host}:{port}")
+    });
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

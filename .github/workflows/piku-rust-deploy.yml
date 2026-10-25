@@ -1,0 +1,96 @@
+name: Build and deploy Rust app to Piku
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: Piku app name and isolated data-directory name
+        required: true
+        type: string
+      binary-name:
+        description: Cargo binary name to build and run
+        required: true
+        type: string
+      domain:
+        description: Public hostname routed to this app by Piku
+        required: true
+        type: string
+      build-css:
+        description: Build Tailwind assets before compiling the Rust binary
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      VPS_HOST:
+        required: true
+      VPS_SSH_PORT:
+        required: true
+      VPS_SSH_KEY:
+        required: true
+      VPS_KNOWN_HOSTS:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: piku-${{ inputs.app-name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CSS assets
+        if: ${{ inputs.build-css }}
+        run: |
+          npm ci
+          npm run css:build
+
+      - name: Build Linux executable
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+        run: |
+          [[ "$BINARY_NAME" =~ ^[A-Za-z0-9_-]+$ ]]
+          cargo build --release --locked --bin "$BINARY_NAME"
+          test -s "target/release/$BINARY_NAME"
+
+      - name: Prepare SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          test -n "$VPS_KNOWN_HOSTS"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Push artifact-only release to Piku
+        env:
+          APP_NAME: ${{ inputs.app-name }}
+          BINARY_NAME: ${{ inputs.binary-name }}
+          APP_DOMAIN: ${{ inputs.domain }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+        run: |
+          [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]]
+          [[ "$BINARY_NAME" =~ ^[A-Za-z0-9_-]+$ ]]
+          [[ "$APP_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]
+          test -n "$VPS_HOST"
+          test -n "$VPS_SSH_PORT"
+          package="$RUNNER_TEMP/piku-release"
+          mkdir -p "$package"
+          install -m 755 "target/release/$BINARY_NAME" "$package/$BINARY_NAME"
+          printf '%s\n' 'release: /bin/true' "web: ./$BINARY_NAME" > "$package/Procfile"
+          printf '%s\n' "DATABASE_URL=file:\${DATA_ROOT}/${APP_NAME}.db" 'SESSION_SECURE=true' 'RUST_LOG=info' "NGINX_SERVER_NAME=$APP_DOMAIN" > "$package/ENV"
+          cd "$package"
+          git init --quiet --initial-branch=main
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git add "$BINARY_NAME" Procfile ENV
+          git commit --quiet -m "Deploy $GITHUB_SHA"
+          git remote add piku "piku@${VPS_HOST}:${APP_NAME}"
+          export GIT_SSH_COMMAND="ssh -p ${VPS_SSH_PORT} -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          git push --force piku HEAD:main
