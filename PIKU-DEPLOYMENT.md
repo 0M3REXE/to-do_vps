@@ -88,4 +88,4 @@ Piku references: [GitHub project](https://github.com/piku/piku), [Procfile](http
 
 ## Deployment record
 
-The first GitHub Actions build and artifact-only Piku push succeeded. The app is running as Piku's `web` process, and its `/healthz` returns HTTP 200 over local HTTPS and public IPv6. The initial public IPv4 health check failed because that route reaches a separate Caddy endpoint. The workflow now checks the app's local HTTPS route through Piku's restricted SSH command; rerun it after pushing this change to confirm CI is green.
+GitHub Actions run [40209267256](https://github.com/0M3REXE/to-do_vps/actions/runs/40209267256) succeeded for commit `7688450589989c7a01e84d951afe99a7fb296357`: CSS and the Linux executable built on GitHub, the artifact-only release was pushed to Piku, and the local HTTPS health check returned HTTP 200. Piku reports one `web` process. A direct check over the VPS's public IPv6 also returned HTTP 200. The public IPv4 web route still reaches a separate Caddy endpoint, so the provider's IPv4 forwarding needs correction for IPv4-only clients.
