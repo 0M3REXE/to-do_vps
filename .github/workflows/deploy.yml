@@ -15,5 +15,6 @@ jobs:
       app-name: todo
       binary-name: todo
       domain: todorust.duckdns.org
+      additional-domains: qp90t.aiccloud.online
       build-css: true
     secrets: inherit

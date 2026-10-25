@@ -68,7 +68,9 @@ The caller workflow `.github/workflows/deploy.yml` runs on pushes to `main` or `
 4. Uses Piku's restricted SSH command to check the app's HTTPS route through loopback on the VPS.
 5. Piku stores the database at `~/.piku/data/todo/todo.db`, listens on its assigned private `PORT`, and routes `todorust.duckdns.org` to the app.
 
-The check validates the app and Piku's local TLS route. It does not verify the external IPv4 route. During this deployment, IPv6 reached this VPS's Nginx/Piku stack, while IPv4 port 80 answered with a separate `Server: Caddy` endpoint and IPv4 TLS failed. IPv4 web access needs the VPS provider's port 80/443 forwarding corrected; the VPS itself has no Caddy process. The app returned HTTP 200 over HTTPS on IPv6 after applying the AppArmor rule above.
+The caller workflow may pass `additional-domains` for provider-generated hostnames. To-do currently includes `qp90t.aiccloud.online` because AICCloud's proxy forwards that hostname to the VPS's Nginx.
+
+The check validates the app and Piku's local TLS route. It does not verify the external proxy route. IPv6 reaches this VPS's Nginx/Piku stack directly. AICCloud's generated hostname reaches the VPS through its Caddy proxy; it previously received a 403 because Piku did not recognize that hostname. The caller now includes it as an additional Piku hostname. The DuckDNS IPv4 route separately returned a Caddy redirect followed by a TLS failure. The VPS itself has no Caddy process. The app returned HTTP 200 over HTTPS on IPv6 after applying the AppArmor rule above.
 
 Each Piku app gets its own data directory and a separate SQLite-compatible libSQL database file. This is embedded libSQL, not a separate Turso server. Piku runs apps under its `piku` Unix account, so per-app data paths separate normal app data but are not a strong security sandbox between mutually untrusted apps.
 

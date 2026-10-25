@@ -15,6 +15,11 @@ on:
         description: Public hostname routed to this app by Piku
         required: true
         type: string
+      additional-domains:
+        description: Optional comma-separated host aliases routed to this app by Piku
+        required: false
+        default: ''
+        type: string
       build-css:
         description: Build Tailwind assets before compiling the Rust binary
         required: false
@@ -72,19 +77,25 @@ jobs:
           APP_NAME: ${{ inputs.app-name }}
           BINARY_NAME: ${{ inputs.binary-name }}
           APP_DOMAIN: ${{ inputs.domain }}
+          APP_ADDITIONAL_DOMAINS: ${{ inputs.additional-domains }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
         run: |
           [[ "$APP_NAME" =~ ^[a-z][a-z0-9-]{1,30}$ ]]
           [[ "$BINARY_NAME" =~ ^[A-Za-z0-9_-]+$ ]]
           [[ "$APP_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]
+          server_names="$APP_DOMAIN"
+          if [[ -n "$APP_ADDITIONAL_DOMAINS" ]]; then
+            [[ "$APP_ADDITIONAL_DOMAINS" =~ ^[A-Za-z0-9.-]+(,[A-Za-z0-9.-]+)*$ ]]
+            server_names="$APP_DOMAIN,$APP_ADDITIONAL_DOMAINS"
+          fi
           test -n "$VPS_HOST"
           test -n "$VPS_SSH_PORT"
           package="$RUNNER_TEMP/piku-release"
           mkdir -p "$package"
           install -m 755 "target/release/$BINARY_NAME" "$package/$BINARY_NAME"
           printf '%s\n' 'release: /bin/true' "web: ./$BINARY_NAME" > "$package/Procfile"
-          printf '%s\n' "DATABASE_URL=file:\${DATA_ROOT}/${APP_NAME}.db" 'SESSION_SECURE=true' 'RUST_LOG=info' "NGINX_SERVER_NAME=$APP_DOMAIN" > "$package/ENV"
+          printf '%s\n' "DATABASE_URL=file:\${DATA_ROOT}/${APP_NAME}.db" 'SESSION_SECURE=true' 'RUST_LOG=info' "NGINX_SERVER_NAME=$server_names" > "$package/ENV"
           cd "$package"
           git init --quiet --initial-branch=main
           git config user.name github-actions
