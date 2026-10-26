@@ -1,5 +1,9 @@
 // Alpine components and glue for the whole app.
 //
+// Must be loaded *before* alpine.min.js: Alpine dispatches `alpine:init` as
+// soon as it starts, so the listener below has to be registered first or
+// `x-data="app"` resolves to an undefined variable and every directive dies.
+//
 // Registered from a static file rather than inline `x-data="{}"` because the
 // CSP forbids `unsafe-eval` and this build of Alpine (`@alpinejs/csp`,
 // vendored as static/vendor/alpine.min.js) evaluates only a restricted,
