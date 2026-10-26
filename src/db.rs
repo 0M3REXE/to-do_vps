@@ -112,6 +112,8 @@ pub async fn migrate(conn: &Db) -> Result<(), Error> {
     const MIGRATIONS: &[(i64, &str)] = &[
         (1, include_str!("../migrations/0001_libsql_schema.sql")),
         (2, include_str!("../migrations/0002_auth_rate_limits.sql")),
+        (3, include_str!("../migrations/0003_session_absolute_expiry.sql")),
+        (4, include_str!("../migrations/0004_session_payload_clear.sql")),
     ];
 
     conn.execute(

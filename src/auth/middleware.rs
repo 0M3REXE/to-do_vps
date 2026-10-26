@@ -1,13 +1,16 @@
 //! # Two middlewares: "you must be logged in", and "this POST is not a forgery"
 
 use axum::{
-    extract::{Request, State},
+    extract::{OriginalUri, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
+use tower_cookies::Cookies;
 
-use super::AuthSession;
+use super::{AuthSession, security};
+use super::security::{SECURITY_DATA_KEY, SessionPolicy, SessionSecurity};
+
 
 /// htmx sets this on every request it makes, and reads `HX-Redirect` back to
 /// tell it to do a full browser navigation instead of a swap.
@@ -38,15 +41,151 @@ pub fn rate_limit_address(headers: &HeaderMap) -> Option<String> {
 /// make htmx swap a whole login page into `#todo-list` — leaving the visitor
 /// staring at a login form in the middle of their list, with no way out.
 pub async fn require_auth(req: Request, next: Next) -> Response {
-    let logged_in = req
+    eprintln!("RA path={}", req.uri().path());
+    if req
         .extensions()
         .get::<AuthSession>()
-        .is_some_and(|session| session.user.is_some());
-
-    if logged_in {
+        .is_some_and(|session| session.user.is_some())
+    {
         return next.run(req).await;
     }
 
+    login_redirect(&req)
+}
+
+/// The normal login flow, plus device binding, absolute lifetime, and the
+/// recent-authentication gate for sensitive account actions.
+///
+/// This runs inside the todo and account routers, so it sees the same path
+/// that the existing tests expect (for example `/` for `/app`).
+pub async fn require_session(
+    req: Request,
+    next: Next,
+) -> Response {
+    eprintln!("RS TOP path={}", req.uri().path());
+    let policy = match req.extensions().get::<SessionPolicy>().cloned() {
+        Some(policy) => policy,
+        None => {
+            println!("require_session: no policy extension");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let cookies = match req.extensions().get::<Cookies>().cloned() {
+        Some(cookies) => cookies,
+        None => {
+            println!("require_session: no cookies extension");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let original_uri = req
+        .extensions()
+        .get::<OriginalUri>()
+        .cloned()
+        .unwrap_or_else(|| OriginalUri(req.uri().clone()));
+    println!("require_session path={}", req.uri().path());
+
+    // The body of the guard needs `req` and the extracted values. Move the
+    // rest into a helper by shadowing is not possible, so keep the logic here.
+    let session = match req.extensions().get::<AuthSession>() {
+        Some(session) if session.user.is_some() => session.clone(),
+        _ => return login_redirect(&req),
+    };
+
+    let session = session;
+    let path = req.uri().path();
+
+    // The re-authentication page must remain reachable even when the device
+    // cookie is missing. It is still protected by authentication and the
+    // absolute lifetime check above.
+    if path == "/account/reauth" {
+        return next.run(req).await;
+    }
+
+    let security = match session
+        .session
+        .get::<SessionSecurity>(SECURITY_DATA_KEY)
+        .await
+    {
+        Ok(Some(security)) => security,
+        Ok(None) => return step_up_redirect(&policy, &req, &original_uri.0, "missing"),
+        Err(err) => {
+            tracing::error!(error = %err, "session store failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let now = security::now_unix();
+
+    // Device token: a copied session cookie without the matching device cookie
+    // cannot proceed.
+    let device_ok = cookies
+        .get(&policy.device_cookie_name)
+        .map(|cookie| security::hash_token(cookie.value()))
+        .as_deref()
+        == Some(security.device_hash.as_str());
+    if !device_ok {
+        return step_up_redirect(&policy, &req, &original_uri.0, "device");
+    }
+
+    // User-Agent: a copied cookie used in another browser changes this.
+    if security::request_user_agent(req.headers()) != security.user_agent {
+        return step_up_redirect(&policy, &req, &original_uri.0, "ua");
+    }
+
+    // Sensitive actions require a password confirmation within the recent
+    // window. Password change is intentionally excluded because its form
+    // already requires the current password.
+    if needs_recent_auth(req.method(), path)
+        && now.saturating_sub(security.last_step_up) > policy.step_up.whole_seconds()
+    {
+        return step_up_redirect(&policy, &req, &original_uri.0, "recent");
+    }
+
+    // Throttle the activity write so an active session slides forward without
+    // turning every read into a database write.
+    if now.saturating_sub(security.last_seen) >= security::TOUCH_INTERVAL_SECONDS {
+        let mut security = security;
+        security.last_seen = now;
+        let ip = security::request_ip(req.headers());
+        let ip_changed = security.last_ip != ip;
+        if ip_changed {
+            tracing::info!(
+                user.id = session.user.as_ref().map(|user| user.id),
+                old.ip = %security.last_ip,
+                new.ip = %ip,
+                "session_ip_changed"
+            );
+            security.last_ip = ip;
+        }
+        if let Err(err) = session
+            .session
+            .insert(SECURITY_DATA_KEY, &security)
+            .await
+        {
+            tracing::error!(error = %err, "session store failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    next.run(req).await
+}
+
+fn needs_recent_auth(method: &axum::http::Method, path: &str) -> bool {
+    if method != axum::http::Method::GET
+        && method != axum::http::Method::POST
+    {
+        // Be conservative: unknown methods on account paths require confirmation.
+        path == "/account/sessions"
+            || path == "/account/logout-everywhere"
+            || path.starts_with("/account/sessions/")
+    } else {
+        path == "/account/sessions"
+            || path == "/account/logout-everywhere"
+            || path.starts_with("/account/sessions/")
+    }
+}
+
+fn login_redirect(req: &Request) -> Response {
     if req
         .headers()
         .get(HX_REQUEST_TYPE)
@@ -61,6 +200,45 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     Redirect::to(&target).into_response()
 }
 
+fn step_up_redirect(
+    _policy: &SessionPolicy,
+    req: &Request,
+    original_uri: &axum::http::Uri,
+    reason: &str,
+) -> Response {
+    let next = if req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD
+    {
+        original_uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/app")
+    } else {
+        match req.uri().path() {
+            "/account/sessions" | "/account/sessions/" => "/account/sessions",
+            "/account/logout-everywhere" => "/account/password",
+            "/account/password" => "/account/password",
+            _ => "/app",
+        }
+    };
+    let next = safe_next(next);
+    let target = format!(
+        "/account/reauth?reason={}&next={}",
+        reason,
+        encode_query_value(&next)
+    );
+
+    if req
+        .headers()
+        .get(HX_REQUEST_TYPE)
+        .and_then(|value| value.to_str().ok())
+        == Some("partial")
+    {
+        return (StatusCode::OK, [(HX_REDIRECT, target.as_str())]).into_response();
+    }
+
+    Redirect::to(&target).into_response()
+}
+
 /// Rejects state-changing requests that arrive from another site.
 ///
 /// The session cookie is `SameSite=Lax`, which already stops a cross-site form
@@ -72,15 +250,59 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
 /// `Origin` on a POST, so their absence means a non-browser client (curl, this
 /// project's own test suite) rather than a forged browser request.
 pub async fn verify_origin(
-    State(_allowed_host): State<String>,
-    _headers: HeaderMap,
+    State(allowed_hosts): State<String>,
+    headers: HeaderMap,
     req: Request,
     next: Next,
 ) -> Response {
     if !is_state_changing(req.method()) {
         return next.run(req).await;
     }
+
+    // Browsers send Origin on form submissions and fetch requests. Referer is
+    // a fallback for older clients. If either is present but malformed or
+    // foreign, reject it rather than silently treating it as absent.
+    if headers.contains_key(header::ORIGIN) || headers.contains_key(header::REFERER) {
+        let Some(origin_host) = presented_host(&headers) else {
+            return cross_origin_refused(&headers, &req);
+        };
+
+        let request_host = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .and_then(normalize_host);
+        let explicitly_allowed = allowed_hosts
+            .split(',')
+            .filter_map(normalize_host)
+            .any(|host| host == origin_host);
+
+        if !explicitly_allowed && request_host.as_deref() != Some(origin_host.as_str()) {
+            return cross_origin_refused(&headers, &req);
+        }
+    } else if headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|site| site.eq_ignore_ascii_case("cross-site"))
+    {
+        // Some browser requests omit Origin and Referer. Fetch Metadata still
+        // lets us reject an explicitly cross-site state change.
+        return cross_origin_refused(&headers, &req);
+    }
+
     next.run(req).await
+}
+
+fn cross_origin_refused(headers: &HeaderMap, req: &Request) -> Response {
+    tracing::warn!(
+        method = %req.method(),
+        path = %req.uri().path(),
+        presented_host = ?presented_host(headers),
+        ip = %super::security::request_ip(headers),
+        ua = %super::security::request_user_agent(headers),
+        "cross_origin_request_refused"
+    );
+    (StatusCode::FORBIDDEN, "cross-origin request refused").into_response()
 }
 
 /// Only the methods that change something need the check. A GET cannot alter

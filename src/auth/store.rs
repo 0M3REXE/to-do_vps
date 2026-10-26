@@ -11,17 +11,37 @@
 //! patching upstream crates together with version restrictions.
 
 use async_trait::async_trait;
-use libsql::Error;
-use sha2::{Digest, Sha256};
-
 use axum_login::tower_sessions::{
     SessionStore,
     session::{Id, Record},
     session_store::{Error as SessionError, Result as SessionResult},
 };
+use libsql::Error;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
-use super::{AUTH_DATA_KEY, User};
+use super::{
+    AUTH_DATA_KEY, User,
+    security::{self, SECURITY_DATA_KEY, SessionSecurity},
+};
 use crate::db::{self, Db, Row};
+
+/// The hard upper bound on a session's life, regardless of activity. The
+/// database keeps `created_at`; `save` never moves it.
+const MAX_SESSION_AGE_DAYS: i64 = 7;
+
+fn session_age_cutoff() -> String {
+    db::format_ts(
+        time::OffsetDateTime::now_utc() - time::Duration::days(MAX_SESSION_AGE_DAYS),
+    )
+}
+
+/// The primary key is a hash of the cookie's session id. A database dump must
+/// not contain a value that can be replayed as a cookie.
+fn session_key(id: &Id) -> String {
+    security::hash_token(&id.0.to_string())
+}
 
 /// Every `SELECT` on users selects exactly these columns, in exactly this
 /// order — `user_row` decodes positionally, so drifting apart is not possible.
@@ -168,15 +188,18 @@ impl DbStore {
     async fn insert_new(&self, record: &Record) -> Result<(), Error> {
         // Serialising is not a database concern, so it is folded into a
         // misuse error rather than widening every signature.
-        let data = encode(record).map_err(|err| Error::Misuse(err.to_string()))?;
+        let data = encode_data(record).map_err(|err| Error::Misuse(err.to_string()))?;
+        let created_at = db::now_ts();
         let affected = db::execute(
             &self.db,
-            "insert into sessions (id, data, expiry_date, user_id) values (?1, ?2, ?3, ?4)",
+            "insert into sessions (id, data, expiry_date, user_id, created_at)
+             values (?1, ?2, ?3, ?4, ?5)",
             vec![
-                db::ps(record.id.0.to_string()),
+                db::ps(session_key(&record.id)),
                 db::ps(data),
                 db::pt(record.expiry_date),
                 db::pn(owner_of(record).map(db::pi)),
+                db::ps(created_at),
             ],
         )
         .await?;
@@ -222,19 +245,21 @@ impl SessionStore for DbStore {
     }
 
     async fn save(&self, record: &Record) -> SessionResult<()> {
-        let data = encode(record)?;
+        let data = encode_data(record)?;
         db::execute(
             &self.db,
-            "insert into sessions (id, data, expiry_date, user_id) values (?1, ?2, ?3, ?4)
+            "insert into sessions (id, data, expiry_date, user_id, created_at)
+             values (?1, ?2, ?3, ?4, ?5)
              on conflict (id) do update
                  set data = excluded.data,
                      expiry_date = excluded.expiry_date,
                      user_id = excluded.user_id",
             vec![
-                db::ps(record.id.0.to_string()),
+                db::ps(session_key(&record.id)),
                 db::ps(data),
                 db::pt(record.expiry_date),
                 db::pn(owner_of(record).map(db::pi)),
+                db::ps(db::now_ts()),
             ],
         )
         .await
@@ -243,15 +268,29 @@ impl SessionStore for DbStore {
     }
 
     async fn load(&self, session_id: &Id) -> SessionResult<Option<Record>> {
-        // Expiry is decided by the comparison in the query, so an expired row
-        // is never handed back and never has to be parsed.
+        let _ = std::fs::write(
+            "C:\\Users\\OMER\\Desktop\\to-do\\debug2.txt",
+            format!("load called key={}", session_key(session_id)),
+        );
+        // Expiry is decided by the query, so an idle or absolutely expired
+        // session is never handed back and never has to be parsed. `created_at`
+        // is null only for pre-migration sessions, which are intentionally
+        // invalidated because their age cannot be established safely.
+        let now = db::now_ts();
+        let age_cutoff = session_age_cutoff();
         db::opt_query(
             &self.db,
-            "select data from sessions where id = ?1 and expiry_date > ?2",
-            vec![db::ps(session_id.0.to_string()), db::ps(db::now_ts())],
+            "select data, expiry_date from sessions
+             where id = ?1 and expiry_date > ?2 and created_at > ?3",
+            vec![
+                db::ps(session_key(session_id)),
+                db::ps(now),
+                db::ps(age_cutoff),
+            ],
             |row| {
                 let json = db::rs(row, 0)?;
-                decode(&json).map_err(|err| Error::Misuse(err.to_string()))
+                let expiry = db::rs(row, 1)?;
+                decode_data(session_id, &json, &expiry).map_err(|err| Error::Misuse(err.to_string()))
             },
         )
         .await
@@ -262,7 +301,7 @@ impl SessionStore for DbStore {
         db::execute(
             &self.db,
             "delete from sessions where id = ?1",
-            vec![db::ps(session_id.0.to_string())],
+            vec![db::ps(session_key(session_id))],
         )
         .await
         .map_err(backend)?;
@@ -290,11 +329,12 @@ pub async fn delete_sessions_for_user(db: &Db, user_id: i64) -> Result<u64, Erro
 /// How many live sessions an account has. Shown on the account page so the
 /// visitor can see that "log out everywhere" did something.
 pub async fn count_sessions_for_user(db: &Db, user_id: i64) -> Result<i64, Error> {
+    let age_cutoff = session_age_cutoff();
     db::scalar_i64(
         db,
         "select count(*) from sessions
-         where user_id = ?1 and expiry_date > ?2",
-        vec![db::pi(user_id), db::ps(db::now_ts())],
+         where user_id = ?1 and expiry_date > ?2 and created_at > ?3",
+        vec![db::pi(user_id), db::ps(db::now_ts()), db::ps(age_cutoff)],
     )
     .await
 }
@@ -339,14 +379,91 @@ pub async fn allow_auth_attempt(
     Ok((attempts > limit).then_some((window_start + window_seconds - now) as u64))
 }
 
-/// The session record is a library type, so it has to be turned into text on
-/// the way in and back into the type on the way out.
-fn encode(record: &Record) -> Result<String, SessionError> {
-    serde_json::to_string(record).map_err(|err| SessionError::Encode(err.to_string()))
+/// One live session as the sessions page needs it. `key` is the hashed
+/// database primary key and must never be rendered.
+#[derive(Clone, Debug)]
+pub struct SessionSummary {
+    pub key: String,
+    pub created_at: String,
+    pub security: SessionSecurity,
 }
 
-fn decode(json: &str) -> Result<Record, SessionError> {
-    serde_json::from_str(json).map_err(|err| SessionError::Decode(err.to_string()))
+/// Lists a user's live sessions. Rows without security metadata are skipped:
+/// they cannot be identified for revocation, and the payload migration clears
+/// the only realistic source of them.
+pub async fn list_sessions_for_user(
+    db: &Db,
+    user_id: i64,
+) -> Result<Vec<SessionSummary>, Error> {
+    let rows = db::query_all(
+        db,
+        "select id, data, created_at from sessions
+         where user_id = ?1 and expiry_date > ?2 and created_at > ?3",
+        vec![
+            db::pi(user_id),
+            db::ps(db::now_ts()),
+            db::ps(session_age_cutoff()),
+        ],
+        |row| {
+            let key = db::rs(row, 0)?;
+            let json = db::rs(row, 1)?;
+            let created_at = db::ros(row, 2)?.unwrap_or_default();
+            let data: HashMap<String, Value> = match serde_json::from_str(&json) {
+                Ok(data) => data,
+                Err(_) => return Ok(None),
+            };
+            let Some(raw) = data.get(SECURITY_DATA_KEY) else {
+                return Ok(None);
+            };
+            let security = match serde_json::from_value::<SessionSecurity>(raw.clone()) {
+                Ok(security) => security,
+                Err(_) => return Ok(None),
+            };
+            Ok(Some(SessionSummary {
+                key,
+                created_at,
+                security,
+            }))
+        },
+    )
+    .await?;
+
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// Deletes a row by its already-hashed database key. The public id check is
+/// done by the caller; the key is never accepted from the browser.
+pub async fn delete_session_by_key(db: &Db, key: &str) -> Result<u64, Error> {
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(0);
+    }
+
+    db::execute(
+        db,
+        "delete from sessions where id = ?1",
+        vec![db::ps(key)],
+    )
+    .await
+}
+
+/// The session record is a library type. Store only its data map: the raw
+/// session id and expiry already live in their own columns and must not be
+/// duplicated into JSON.
+fn encode_data(record: &Record) -> Result<String, SessionError> {
+    serde_json::to_string(&record.data).map_err(|err| SessionError::Encode(err.to_string()))
+}
+
+fn decode_data(id: &Id, json: &str, expiry: &str) -> Result<Record, SessionError> {
+    let data: HashMap<String, Value> =
+        serde_json::from_str(json).map_err(|err| SessionError::Decode(err.to_string()))?;
+    let expiry_date = time::PrimitiveDateTime::parse(expiry, crate::db::TIME_FORMAT)
+        .map(|dt| dt.assume_utc())
+        .map_err(|err| SessionError::Decode(err.to_string()))?;
+    Ok(Record {
+        id: *id,
+        data,
+        expiry_date,
+    })
 }
 
 /// The store's error type is its own, so the detail is carried across as text.

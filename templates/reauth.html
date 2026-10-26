@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Confirm your password · Todo List</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;0,700,1,400&display=swap">
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="apple-touch-icon" href="/static/icons/icon-180x180.png">
+    <meta name="theme-color" content="#d4a033">
+<script>// Applies the saved theme before the stylesheet paints.
+//
+// Inlined (allow-listed by a script-src hash) rather than served as a file
+// because this is code on the critical path: it must run before the first
+// paint so dark-mode visitors never see a light flash.
+(function () {
+  try {
+    var theme = localStorage.getItem('todo-theme');
+    if (theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (_) { /* Storage disabled: the light default below is fine. */ }
+})();</script>
+<script src="/static/app.js" defer></script>
+<script src="/static/vendor/alpine.min.js" defer></script>
+</head>
+<body x-data="app" class="page min-h-screen bg-[var(--paper)] text-[var(--ink)] antialiased">
+    <a href="#main-content" class="skip-link">Skip to confirmation</a>
+    <header class="shell"><div class="header">
+        <a href="/app" class="header__brand header__brand--back">
+            <img src="/static/brand-mark.svg" width="32" height="32" alt="">
+            <span>Back to your list</span>
+        </a>
+        {% include "theme_toggle.html" %}
+    </div></header>
+    <main id="main-content" class="page__main"><div class="shell">
+        <section class="auth card">
+            <h1 class="auth__title">Confirm it's you</h1>
+            <p class="auth__sub">{{ reason_message }}</p>
+            {% if let Some(message) = error %}<div class="alert alert--danger" role="alert">{{ message }}</div>{% endif %}
+            <form method="post" action="/account/reauth">
+                <input type="hidden" name="next" value="{{ next }}">
+                <div class="field"><label class="field__label" for="current_password">Current password</label><div class="input-group">
+                    <input class="input" type="password" id="current_password" name="current_password" autocomplete="current-password" required>
+                    <button class="input-group__toggle" type="button" @click="togglePasswords($event)" aria-pressed="false">Show</button>
+                </div></div>
+                <button class="btn btn--primary" type="submit">Confirm</button>
+            </form>
+            <p class="field__hint"><a href="/logout">Log out instead</a></p>
+        </section>
+    </div></main>
+</body>
+</html>

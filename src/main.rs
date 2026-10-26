@@ -33,6 +33,10 @@ async fn main() {
         .init();
 
     let config = app::AppConfig::from_env();
+    if let Err(err) = config.validate() {
+        tracing::error!(error = %err, "invalid configuration");
+        std::process::exit(1);
+    }
     let pool = connect_db().await;
     let app = app::build_app(pool, config);
 

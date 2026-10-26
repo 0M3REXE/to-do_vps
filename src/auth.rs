@@ -9,16 +9,18 @@ mod backend;
 mod handlers;
 pub mod middleware;
 pub mod password;
+pub mod security;
 mod store;
 mod templates;
 
 pub use backend::{AuthBackend, Credentials};
 pub use handlers::{account_routes, routes};
-pub use middleware::{require_auth, safe_next, verify_origin};
+pub use middleware::{require_auth, require_session, safe_next, verify_origin};
 pub use password::{MAX_PASSWORD_LEN, MIN_PASSWORD_LEN};
+pub use security::SessionPolicy;
 pub use store::{
-    DbStore, allow_auth_attempt, count_sessions_for_user, create_user, delete_sessions_for_user,
-    find_user,
+    DbStore, SessionSummary, allow_auth_attempt, count_sessions_for_user, create_user,
+    delete_session_by_key, delete_sessions_for_user, find_user, list_sessions_for_user,
     set_password, user_id_by_email,
 };
 pub(crate) use templates::LandingTemplate;

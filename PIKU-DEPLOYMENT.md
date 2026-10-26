@@ -145,7 +145,7 @@ The caller workflow is `.github/workflows/deploy.yml`. It runs for pushes to `ma
 - Extra provider hostname: `qp90t.aiccloud.online`
 - CSS build: enabled
 
-The reusable workflow `.github/workflows/piku-rust-deploy.yml` builds CSS and the Linux executable on GitHub, creates a temporary artifact-only Git repository, and pushes it to `piku@VPS_HOST:todo`. Piku creates the app on its first push. It stores the database at `~/.piku/data/todo/todo.db`; deploying a new binary does not delete this data directory.
+The reusable workflow `.github/workflows/piku-rust-deploy.yml` builds CSS and the Linux executable on GitHub, creates a temporary artifact-only Git repository, and pushes it to `piku@VPS_HOST:todo`. It supplies the main and additional hostnames to both Piku's virtual-host routing and the app's trusted-origin list, so requests work through a proxy that preserves the public hostname or rewrites it. Piku creates the app on its first push. It stores the database at `~/.piku/data/todo/todo.db`; deploying a new binary does not delete this data directory.
 
 The app must listen on the `BIND_ADDRESS` and `PORT` environment variables and provide `GET /healthz` with an HTTP 200 response. Piku sets these values for each web app. The workflow uses Piku's restricted SSH command to check the app's local HTTPS route after deployment. That check verifies the app and Piku's Nginx TLS route on the VPS; it does not test every external provider proxy or DNS path.
 
@@ -232,6 +232,24 @@ ssh @PikuSsh piku@51.68.205.225 logs todo web
 ```
 
 `logs` streams output; press Ctrl+C to stop following it. Replace `todo` with an app's Piku name. `config:set` updates runtime settings. `config:live` prints current settings, including secrets, so treat its output as sensitive. `destroy` removes an app deployment but preserves its data directory. Back up `~/.piku/data/` off the VPS; the VPS disk is not a backup.
+
+### Sign the To-do session cookie
+
+The app stores session records on the server and gives the browser a random session ID. In production, it also signs that cookie using `SESSION_SECRET`. Signing prevents a client from tampering with the cookie; it does not make a stolen cookie safe to replay. Keep the secret in Piku's runtime configuration, never in the repository or deployment artifact.
+
+Run this once **before deploying the session-cookie hardening change** in PowerShell after defining `$PikuSsh` above. It generates 64 random bytes locally, sends the value directly to Piku's `config:set`, then removes the local variables:
+
+```powershell
+$SessionSecretBytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($SessionSecretBytes)
+$SessionSecret = [BitConverter]::ToString($SessionSecretBytes).Replace("-", "").ToLowerInvariant()
+ssh @PikuSsh piku@51.68.205.225 "config:set todo SESSION_SECRET=$SessionSecret"
+Remove-Variable SessionSecret, SessionSecretBytes
+```
+
+Keep the same key across deployments. If it is changed or lost, users will need to sign in again. The `__Host-session` cookie name also takes effect on the next deployment, so users will sign in once after that release. If the key is missing, the app exits with an error when `SESSION_SECURE=true` and does not start. The cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, host-only, and limited to the root path. Sessions expire after 60 minutes of inactivity and at most 7 days after creation. A second `__Host-device` cookie is also required; losing it forces a password confirmation. These measures reduce common cookie theft and replay risks, but cannot protect a browser already compromised by malware or an attacker who has copied an active cookie and device cookie with the same User-Agent.
+
+Give each app its own randomly generated `SESSION_SECRET`.
 
 ## Troubleshooting
 

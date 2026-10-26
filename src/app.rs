@@ -26,6 +26,7 @@
 use std::time::Duration;
 
 use axum::{
+    Extension,
     extract::{DefaultBodyLimit, Request},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
@@ -75,8 +76,9 @@ pub static ALPINE_JS: &str = include_str!("../static/vendor/alpine.min.js");
 /// edits, so it is served with `must-revalidate` like the stylesheet.
 pub static APP_JS: &str = include_str!("../static/app.js");
 
-/// How long a session may sit untouched before it stops working, and whether
-/// the cookie is allowed to leave a plain-http connection.
+/// How long a session may sit untouched before it stops working, whether the
+/// cookie is allowed to leave a plain-http connection, and how long the
+/// device-binding step-up stays fresh.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     /// Must be `true` anywhere that is not localhost. A `Secure` cookie is
@@ -89,9 +91,16 @@ pub struct AppConfig {
     pub allowed_host: String,
     /// Optional signing key for the session cookie. When set, the cookie is
     /// cryptographically signed so a client cannot tamper with or forge it.
-    /// Sessions are server-side, so this is defense-in-depth, not the sole
-    /// protection.
+    /// Sessions are server-side, so this is defense-in-depth; it does not make
+    /// a stolen cookie usable without the device binding.
     pub session_secret: Option<String>,
+    /// How long a session may sit untouched. Defaults to 60 minutes.
+    pub session_idle: time::Duration,
+    /// How long a password confirmation stays fresh for sensitive actions.
+    /// Defaults to 10 minutes.
+    pub session_step_up: time::Duration,
+    /// How long a device cookie remains valid. Defaults to 30 days.
+    pub session_device: time::Duration,
 }
 
 impl Default for AppConfig {
@@ -101,6 +110,9 @@ impl Default for AppConfig {
             session_secure: true,
             allowed_host: "localhost:3000".to_owned(),
             session_secret: None,
+            session_idle: time::Duration::minutes(60),
+            session_step_up: time::Duration::minutes(10),
+            session_device: time::Duration::days(30),
         }
     }
 }
@@ -134,14 +146,82 @@ impl AppConfig {
             session_secure,
             allowed_host,
             session_secret,
+            session_idle: duration_from_env(
+                "SESSION_IDLE_MINUTES",
+                time::Duration::minutes(1),
+                defaults.session_idle,
+            ),
+            session_step_up: duration_from_env(
+                "SESSION_STEP_UP_MINUTES",
+                time::Duration::minutes(1),
+                defaults.session_step_up,
+            ),
+            session_device: duration_from_env(
+                "SESSION_DEVICE_DAYS",
+                time::Duration::days(1),
+                defaults.session_device,
+            ),
         }
+    }
+
+    /// Builds the small policy value the request guard and handlers use.
+    /// Cookie names are derived here so development and production cannot
+    /// disagree about which cookie they are reading.
+    pub fn session_policy(&self) -> auth::SessionPolicy {
+        auth::SessionPolicy {
+            session_cookie_name: if self.session_secure {
+                "__Host-session".to_owned()
+            } else {
+                "session".to_owned()
+            },
+            device_cookie_name: if self.session_secure {
+                "__Host-device".to_owned()
+            } else {
+                "device".to_owned()
+            },
+            secure: self.session_secure,
+            idle: self.session_idle,
+            step_up: self.session_step_up,
+            device_lifetime: self.session_device,
+        }
+    }
+
+    /// Fails before the server starts when a production configuration would
+    /// silently fall back to unsigned session cookies.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.session_secure && self.session_secret.is_none() {
+            return Err(
+                "SESSION_SECRET must be set when SESSION_SECURE=true; \
+                 generate one with `openssl rand -hex 32`"
+                    .to_owned(),
+            );
+        }
+
+        if let Some(secret) = &self.session_secret {
+            tower_sessions::cookie::Key::try_from(secret.as_bytes())
+                .map_err(|_| "SESSION_SECRET must be a valid 64-byte signing key".to_owned())?;
+        }
+
+        if self.session_idle <= time::Duration::ZERO
+            || self.session_step_up <= time::Duration::ZERO
+            || self.session_device <= time::Duration::ZERO
+        {
+            return Err("session timeouts must be greater than zero".to_owned());
+        }
+
+        Ok(())
     }
 }
 
-/// A session lives a week of inactivity. Long enough that a returning visitor
-/// is not asked to log in daily, short enough that a forgotten laptop does not
-/// keep a live session for months.
-const SESSION_IDLE_LIFETIME: time::Duration = time::Duration::days(7);
+fn duration_from_env(name: &str, unit: time::Duration, default: time::Duration) -> time::Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .and_then(|value| i32::try_from(value).ok())
+        .map(|value| unit * value)
+        .unwrap_or(default)
+}
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_REQUEST_BODY: usize = 16 * 1024;
@@ -235,8 +315,10 @@ async fn landing(session: AuthSession) -> Result<Response, AppError> {
 
 /// Builds the whole application: routes, session layer, auth layer, CSRF check.
 pub fn build_app(db: Db, config: AppConfig) -> Router {
+    let policy = config.session_policy();
     let session_layer = SessionManagerLayer::new(DbStore::new(db.clone()))
-        .with_name("session")
+        .with_name(policy.session_cookie_name.clone())
+        .with_path("/")
         // No JavaScript on this app reads the cookie, so nothing needs it.
         .with_http_only(true)
         // Lax, not Strict: Lax still blocks the cross-site POST that CSRF
@@ -244,7 +326,7 @@ pub fn build_app(db: Db, config: AppConfig) -> Router {
         // logged in.
         .with_same_site(SameSite::Lax)
         .with_secure(config.session_secure)
-        .with_expiry(Expiry::OnInactivity(SESSION_IDLE_LIFETIME));
+        .with_expiry(Expiry::OnInactivity(policy.idle));
 
     let app = Router::new()
         // Public first: landing page, then auth pages.
@@ -362,6 +444,7 @@ pub fn build_app(db: Db, config: AppConfig) -> Router {
     };
 
     let mut app = app
+        .layer(Extension(policy))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .layer(CompressionLayer::new())
         .layer(SetResponseHeaderLayer::overriding(

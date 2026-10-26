@@ -47,6 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Build CSS assets
         if: ${{ inputs.build-css }}
         run: |
@@ -95,7 +98,7 @@ jobs:
           mkdir -p "$package"
           install -m 755 "target/release/$BINARY_NAME" "$package/$BINARY_NAME"
           printf '%s\n' 'release: /bin/true' "web: ./$BINARY_NAME" > "$package/Procfile"
-          printf '%s\n' "DATABASE_URL=file:\${DATA_ROOT}/${APP_NAME}.db" 'SESSION_SECURE=true' 'RUST_LOG=info' "NGINX_SERVER_NAME=$server_names" > "$package/ENV"
+          printf '%s\n' "DATABASE_URL=file:\${DATA_ROOT}/${APP_NAME}.db" 'SESSION_SECURE=true' 'RUST_LOG=info' "NGINX_SERVER_NAME=$server_names" "APP_ALLOWED_HOST=$server_names" > "$package/ENV"
           cd "$package"
           git init --quiet --initial-branch=main
           git config user.name github-actions

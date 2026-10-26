@@ -44,3 +44,35 @@ pub(crate) struct AccountTemplate {
     /// two is ever showing.
     pub(crate) notice: Option<String>,
 }
+
+/// The password step-up page. `message` is already a fixed, safe string.
+#[derive(Template)]
+#[template(path = "reauth.html")]
+pub(crate) struct ReauthTemplate {
+    pub(crate) next: String,
+    pub(crate) reason_message: String,
+    pub(crate) error: Option<String>,
+}
+
+/// One row on the signed-in-devices page.
+#[derive(Clone, Debug)]
+pub(crate) struct SessionView {
+    pub(crate) device: String,
+    pub(crate) user_agent: String,
+    pub(crate) ip: String,
+    pub(crate) signed_in: String,
+    pub(crate) last_seen: String,
+    pub(crate) current: bool,
+    pub(crate) public_id: String,
+}
+
+/// The signed-in-devices page.
+#[derive(Template)]
+#[template(path = "sessions.html")]
+pub(crate) struct SessionsTemplate {
+    pub(crate) email: String,
+    pub(crate) sessions: Vec<SessionView>,
+    pub(crate) notice: Option<String>,
+    pub(crate) error: Option<String>,
+}
+

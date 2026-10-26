@@ -89,9 +89,8 @@ fn form_body(fields: &[(&str, &str)]) -> String {
 /// takes the test's database explicitly, so a client and the test helpers
 /// always operate on the same world.
 pub struct Client {
-    /// The value to send back in a `Cookie:` header. `None` until the server
-    /// hands out a session.
-    cookie: Option<String>,
+    /// Cookie jar keyed by cookie name.
+    cookies: std::collections::BTreeMap<String, String>,
     config: AppConfig,
 }
 
@@ -104,7 +103,7 @@ impl Client {
     /// A visitor with an explicit configuration.
     pub fn with_config(config: AppConfig) -> Self {
         Self {
-            cookie: None,
+            cookies: std::collections::BTreeMap::new(),
             config,
         }
     }
@@ -205,16 +204,10 @@ impl Client {
         let status = response.status();
         let headers = response.headers().clone();
 
-        // Remember whatever the server just set. A logout sends an expired
+        // Remember every cookie the server just set. A logout sends an expired
         // cookie under the same name, which replaces the stored one — the same
         // thing a browser does.
-        if let Some(set) = headers
-            .get(header::SET_COOKIE)
-            .and_then(|v| v.to_str().ok())
-        {
-            let pair = set.split(';').next().unwrap_or_default().trim().to_owned();
-            self.cookie = (!pair.ends_with('=')).then_some(pair);
-        }
+        Self::parse_set_cookie(&headers, &mut self.cookies);
 
         let text = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
@@ -227,10 +220,10 @@ impl Client {
         (status, text, headers)
     }
 
-    /// Starts a request, carrying the cookie and any extra headers.
+    /// Starts a request, carrying all cookies and any extra headers.
     fn start(&self, method: &str, uri: &str) -> axum::http::request::Builder {
         let builder = Request::builder().method(method).uri(uri);
-        match &self.cookie {
+        match self.cookie_header() {
             Some(cookie) => builder.header(header::COOKIE, cookie),
             None => builder,
         }
@@ -370,18 +363,70 @@ impl Client {
         (status, location)
     }
 
-    /// The raw cookie header value, or `None` if the jar is empty.
-    pub fn cookie(&self) -> Option<&str> {
-        self.cookie.as_deref()
+    /// The raw session cookie header value, or `None` if the jar is empty.
+    pub fn cookie(&self) -> Option<String> {
+        self.cookies
+            .iter()
+            .find(|(name, _)| *name == "session" || *name == "__Host-session")
+            .map(|(name, value)| format!("{name}={value}"))
+    }
+
+    /// Every cookie in the jar, ready to send as one `Cookie:` header.
+    pub fn cookie_header(&self) -> Option<String> {
+        if self.cookies.is_empty() {
+            None
+        } else {
+            Some(
+                self
+                    .cookies
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        }
+    }
+
+    /// The device cookie pair, if present.
+    pub fn device_cookie(&self) -> Option<String> {
+        self.cookies
+            .iter()
+            .find(|(name, _)| *name == "device" || *name == "__Host-device")
+            .map(|(name, value)| format!("{name}={value}"))
     }
 
     /// A visitor who presents a session cookie handed to them elsewhere.
     /// Covers the stale-cookie case: the server must greet a dead session with
     /// the login page, not a crash.
     pub fn with_replayed_cookie(raw: impl Into<String>) -> Self {
-        Self {
-            cookie: Some(raw.into()),
-            config: AppConfig::default(),
+        Self::with_replayed_cookies(raw)
+    }
+
+    /// A visitor who presents a full cookie header handed to them elsewhere.
+    pub fn with_replayed_cookies(raw: impl Into<String>) -> Self {
+        let mut client = Self::with_config(AppConfig::default());
+        for pair in raw.into().split(';') {
+            let pair = pair.trim();
+            if let Some((name, value)) = pair.split_once('=') {
+                client.cookies.insert(name.trim().to_owned(), value.trim().to_owned());
+            }
+        }
+        client
+    }
+
+    fn parse_set_cookie(headers: &HeaderMap, jar: &mut std::collections::BTreeMap<String, String>) {
+        for value in headers.get_all(header::SET_COOKIE) {
+            let Ok(text) = value.to_str() else { continue };
+            let pair = text.split(';').next().unwrap_or_default().trim();
+            let Some((name, value)) = pair.split_once('=') else { continue };
+            let name = name.trim().to_owned();
+            let value = value.trim().to_owned();
+            let lower = text.to_ascii_lowercase();
+            if value.is_empty() || lower.contains("max-age=0") {
+                jar.remove(&name);
+            } else {
+                jar.insert(name, value);
+            }
         }
     }
 }

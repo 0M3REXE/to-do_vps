@@ -111,6 +111,6 @@ pub fn build_router(db: TodoStore) -> Router {
         .route("/todos", axum::routing::post(create))
         .route("/todos/{id}/toggle", axum::routing::post(toggle))
         .route("/todos/{id}/delete", axum::routing::post(delete))
-        .route_layer(middleware::from_fn(crate::auth::require_auth))
+        .route_layer(middleware::from_fn(crate::auth::require_session))
         .with_state(db)
 }

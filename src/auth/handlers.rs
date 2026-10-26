@@ -10,15 +10,17 @@
 use askama::Template as _;
 use axum::{
     Form, Router,
-    extract::{Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
+use tower_cookies::Cookies;
 
 use super::{
-    AuthBackend, AuthSession, CurrentUser, User, middleware::safe_next, password, store, templates,
+    AuthBackend, AuthSession, CurrentUser, User, allow_auth_attempt, middleware::safe_next,
+    password, store, templates, security::{self, SECURITY_DATA_KEY, SessionPolicy},
 };
 use crate::AppError;
 use crate::db::Db;
@@ -64,6 +66,8 @@ async fn signup(
     State(db): State<Db>,
     mut session: AuthSession,
     headers: HeaderMap,
+    cookies: Cookies,
+    Extension(policy): Extension<SessionPolicy>,
     Form(form): Form<SignupForm>,
 ) -> Result<Response, AppError> {
     let email = form.email.trim().to_lowercase();
@@ -97,11 +101,27 @@ async fn signup(
     };
 
     session
-        .login(&user)
+        .session
+        .cycle_id()
         .await
         .map_err(|err| AppError::Session(err.to_string()))?;
+    session.login(&user).await.map_err(|err| AppError::Session(err.to_string()))?;
 
-    tracing::info!(user.id = user.id, "account created");
+    let token = security::new_token();
+    let security = security::fresh_security(&headers, &token);
+    session
+        .session
+        .insert(SECURITY_DATA_KEY, &security)
+        .await
+        .map_err(|err| AppError::Session(err.to_string()))?;
+    cookies.add(security::device_cookie(&policy, &token));
+
+    tracing::info!(
+        user.id = user.id,
+        ip = %security::request_ip(&headers),
+        ua = %security::request_user_agent(&headers),
+        "signup succeeded"
+    );
     // Straight to the list: `/` immediately redirects logged-in users to
     // `/app` anyway, so this saves the extra round trip.
     Ok(Redirect::to("/app").into_response())
@@ -168,9 +188,23 @@ async fn login(
     State(db): State<Db>,
     headers: HeaderMap,
     mut session: AuthSession,
+    cookies: Cookies,
+    Extension(policy): Extension<SessionPolicy>,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, AppError> {
     if let Some(retry_after) = rate_limit_delay(&db, &headers, "login", 20, 15 * 60).await? {
+        return Ok(rate_limited(
+            render_login_error(&form.next, "Too many login attempts. Please try again later."),
+            retry_after,
+        ));
+    }
+
+    // Per-account limiting is independent of the request address: a distributed
+    // attacker cannot turn one address into a wide bucket.
+    let account_key = form.email.trim().to_lowercase();
+    if let Some(retry_after) =
+        allow_auth_attempt(&db, "login-account", &account_key, 10, 15 * 60).await?
+    {
         return Ok(rate_limited(
             render_login_error(&form.next, "Too many login attempts. Please try again later."),
             retry_after,
@@ -188,7 +222,11 @@ async fn login(
     let user = match outcome {
         Ok(Some(user)) => user,
         Ok(None) => {
-            tracing::warn!("login refused");
+            tracing::warn!(
+                ip = %security::request_ip(&headers),
+                ua = %security::request_user_agent(&headers),
+                "login refused"
+            );
             return Ok(render_login_error(&form.next, BAD_CREDENTIALS));
         }
         Err(err) => return Err(err),
@@ -207,12 +245,23 @@ async fn login(
         .await
         .map_err(|err| AppError::Session(err.to_string()))?;
 
+    session.login(&user).await.map_err(|err| AppError::Session(err.to_string()))?;
+
+    let token = security::new_token();
+    let security = security::fresh_security(&headers, &token);
     session
-        .login(&user)
+        .session
+        .insert(SECURITY_DATA_KEY, &security)
         .await
         .map_err(|err| AppError::Session(err.to_string()))?;
+    cookies.add(security::device_cookie(&policy, &token));
 
-    tracing::info!(user.id = user.id, "login succeeded");
+    tracing::info!(
+        user.id = user.id,
+        ip = %security::request_ip(&headers),
+        ua = %security::request_user_agent(&headers),
+        "login succeeded"
+    );
     Ok(Redirect::to(&safe_next(&form.next)).into_response())
 }
 
@@ -233,16 +282,27 @@ fn render_login_error(next: &str, message: &str) -> Response {
 
 // --- logout ------------------------------------------------------------------
 
-async fn logout(mut session: AuthSession) -> Result<Response, AppError> {
+async fn logout(
+    headers: HeaderMap,
+    mut session: AuthSession,
+    cookies: Cookies,
+    Extension(policy): Extension<SessionPolicy>,
+) -> Result<Response, AppError> {
     let who = session
         .logout()
         .await
         .map_err(|err| AppError::Session(err.to_string()))?;
 
     if let Some(User { id, .. }) = who {
-        tracing::info!(user.id = id, "logout");
+        tracing::info!(
+            user.id = id,
+            ip = %security::request_ip(&headers),
+            ua = %security::request_user_agent(&headers),
+            "logout"
+        );
     }
 
+    cookies.add(security::expired_device_cookie(&policy));
     Ok(Redirect::to("/login").into_response())
 }
 
@@ -253,6 +313,7 @@ async fn account_form(
     CurrentUser(user): CurrentUser,
     Query(query): Query<AccountQuery>,
 ) -> Result<Html<String>, AppError> {
+    let _ = std::fs::write("C:\\Users\\OMER\\Desktop\\to-do\\debug.txt", format!("account_form user={}", user.id));
     let sessions = store::count_sessions_for_user(&db, user.id).await?;
     let notice = if query.changed.as_deref() == Some("1") {
         Some("Your password was changed. Other devices were signed out.".to_owned())
@@ -283,6 +344,8 @@ async fn change_password(
     State(db): State<Db>,
     mut session: AuthSession,
     headers: HeaderMap,
+    cookies: Cookies,
+    Extension(policy): Extension<SessionPolicy>,
     CurrentUser(user): CurrentUser,
     Form(form): Form<PasswordForm>,
 ) -> Result<Response, AppError> {
@@ -331,12 +394,261 @@ async fn change_password(
         .map_err(raw_session_error)?;
     session.login(&refreshed).await.map_err(session_error)?;
 
-    tracing::info!(user.id = user.id, "password changed");
+    let token = security::new_token();
+    let security = security::fresh_security(&headers, &token);
+    session
+        .session
+        .insert(SECURITY_DATA_KEY, &security)
+        .await
+        .map_err(raw_session_error)?;
+    cookies.add(security::device_cookie(&policy, &token));
+
+    tracing::info!(
+        user.id = user.id,
+        ip = %security::request_ip(&headers),
+        ua = %security::request_user_agent(&headers),
+        "password changed"
+    );
     Ok(Redirect::to("/account/password?changed=1").into_response())
 }
 
-/// Checks the two new-password fields. Kept apart from the current-password
-/// check so the visitor is told about a mismatch before we spend 50ms of Argon2.
+#[derive(Deserialize)]
+struct ReauthQuery {
+    next: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReauthForm {
+    current_password: String,
+    next: String,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionsQuery {
+    revoked: Option<String>,
+    error: Option<String>,
+}
+
+async fn reauth_form(Query(query): Query<ReauthQuery>) -> Result<Html<String>, AppError> {
+    let next = safe_next(query.next.as_deref().unwrap_or_default());
+    Ok(Html(
+        templates::ReauthTemplate {
+            next,
+            reason_message: reauth_reason_message(query.reason.as_deref().unwrap_or("device")),
+            error: None,
+        }
+        .render()?,
+    ))
+}
+
+async fn reauth(
+    State(db): State<Db>,
+    headers: HeaderMap,
+    session: AuthSession,
+    cookies: Cookies,
+    Extension(policy): Extension<SessionPolicy>,
+    CurrentUser(user): CurrentUser,
+    Form(form): Form<ReauthForm>,
+) -> Result<Response, AppError> {
+    let next = safe_next(&form.next);
+
+    if let Some(retry_after) = rate_limit_delay(&db, &headers, "reauth", 10, 15 * 60).await? {
+        return Ok(rate_limited(
+            render_reauth_error(&next, "device", "Too many attempts. Please try again later."),
+            retry_after,
+        ));
+    }
+
+    if let Some(retry_after) =
+        allow_auth_attempt(&db, "reauth-user", &user.id.to_string(), 10, 15 * 60).await?
+    {
+        return Ok(rate_limited(
+            render_reauth_error(&next, "device", "Too many attempts. Please try again later."),
+            retry_after,
+        ));
+    }
+
+    if let Err(message) = check_current_password(&db, &user, &form.current_password).await {
+        tracing::warn!(
+            user.id = user.id,
+            ip = %security::request_ip(&headers),
+            ua = %security::request_user_agent(&headers),
+            "session_step_up_failed"
+        );
+        return Ok(render_reauth_error(&next, form.reason.as_deref().unwrap_or("device"), &message));
+    }
+
+    let token = security::new_token();
+    let mut security = session
+        .session
+        .get::<security::SessionSecurity>(SECURITY_DATA_KEY)
+        .await
+        .map_err(|err| AppError::Session(err.to_string()))?
+        .unwrap_or_else(|| security::fresh_security(&headers, &token));
+
+    security.last_step_up = security::now_unix();
+    security.last_seen = security.last_step_up;
+    security.device_hash = security::hash_token(&token);
+    security.user_agent = security::request_user_agent(&headers);
+    security.last_ip = security::request_ip(&headers);
+
+    session
+        .session
+        .cycle_id()
+        .await
+        .map_err(raw_session_error)?;
+    session
+        .session
+        .insert(SECURITY_DATA_KEY, &security)
+        .await
+        .map_err(|err| AppError::Session(err.to_string()))?;
+    cookies.add(security::device_cookie(&policy, &token));
+
+    tracing::info!(
+        user.id = user.id,
+        ip = %security::request_ip(&headers),
+        ua = %security::request_user_agent(&headers),
+        "session_step_up_succeeded"
+    );
+
+    Ok(Redirect::to(&next).into_response())
+}
+
+fn render_reauth_error(next: &str, reason: &str, message: &str) -> Response {
+    let template = templates::ReauthTemplate {
+        next: safe_next(next),
+        reason_message: reauth_reason_message(reason),
+        error: Some(message.to_owned()),
+    };
+
+    match template.render() {
+        Ok(body) => Html(body).into_response(),
+        Err(err) => {
+            tracing::error!(?err, "template render failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn reauth_reason_message(reason: &str) -> String {
+    match reason {
+        "recent" => "Confirm your password to continue to a sensitive part of your account."
+            .to_owned(),
+        "ua" => "This session is being used from a different browser. Confirm your password to continue."
+            .to_owned(),
+        "missing" => "Confirm your password to continue.".to_owned(),
+        _ => "This session is being used from a device we have not seen before. Confirm your password to continue."
+            .to_owned(),
+    }
+}
+
+async fn sessions_page(
+    State(db): State<Db>,
+    CurrentUser(user): CurrentUser,
+    session: AuthSession,
+    Query(query): Query<SessionsQuery>,
+) -> Result<Html<String>, AppError> {
+    let current_public_id = session
+        .session
+        .get::<security::SessionSecurity>(SECURITY_DATA_KEY)
+        .await
+        .ok()
+        .flatten()
+        .map(|security| security.public_id);
+
+    let summaries = store::list_sessions_for_user(&db, user.id).await?;
+    let mut sessions: Vec<templates::SessionView> = summaries
+        .into_iter()
+        .map(|summary| templates::SessionView {
+            device: security::describe_user_agent(&summary.security.user_agent),
+            user_agent: summary.security.user_agent,
+            ip: if summary.security.last_ip == "unknown" {
+                "Not recorded".to_owned()
+            } else {
+                summary.security.last_ip
+            },
+            signed_in: summary.created_at,
+            last_seen: format_unix(summary.security.last_seen),
+            current: current_public_id
+                .as_deref()
+                == Some(summary.security.public_id.as_str()),
+            public_id: summary.security.public_id,
+        })
+        .collect();
+
+    sessions.sort_by(|left, right| {
+        right
+            .current
+            .cmp(&left.current)
+            .then_with(|| right.last_seen.cmp(&left.last_seen))
+    });
+
+    let notice = if query.revoked.as_deref() == Some("1") {
+        Some("That device was signed out.".to_owned())
+    } else {
+        None
+    };
+
+    Ok(Html(
+        templates::SessionsTemplate {
+            email: user.email,
+            sessions,
+            notice,
+            error: query.error,
+        }
+        .render()?,
+    ))
+}
+
+async fn revoke_session(
+    State(db): State<Db>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+    session: AuthSession,
+    CurrentUser(user): CurrentUser,
+) -> Result<Response, AppError> {
+    if public_id.len() > 64
+        || !public_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Ok(Redirect::to("/account/sessions?error=invalid").into_response());
+    }
+
+    let current_public_id = session
+        .session
+        .get::<security::SessionSecurity>(SECURITY_DATA_KEY)
+        .await
+        .ok()
+        .flatten()
+        .map(|security| security.public_id);
+
+    let summaries = store::list_sessions_for_user(&db, user.id).await?;
+    let Some(target) = summaries
+        .into_iter()
+        .find(|summary| summary.security.public_id == public_id)
+    else {
+        return Ok(Redirect::to("/account/sessions?error=not_found").into_response());
+    };
+
+    if current_public_id.as_deref() == Some(target.security.public_id.as_str()) {
+        return Ok(Redirect::to("/account/sessions?error=current").into_response());
+    }
+
+    store::delete_session_by_key(&db, &target.key).await?;
+    tracing::info!(
+        user.id = user.id,
+        target.public_id = %target.security.public_id,
+        ip = %security::request_ip(&headers),
+        ua = %security::request_user_agent(&headers),
+        "session_revoked"
+    );
+
+    Ok(Redirect::to("/account/sessions?revoked=1").into_response())
+}
+
 fn check_new_password(form: &PasswordForm) -> Result<(), String> {
     if form.new_password != form.new_password_confirm {
         return Err("New passwords do not match.".to_owned());
@@ -371,9 +683,13 @@ async fn check_current_password(db: &Db, user: &User, current: &str) -> Result<(
 /// everything else is deleted, which is the entire point of the button.
 async fn logout_everywhere(
     State(db): State<Db>,
+    headers: HeaderMap,
     mut session: AuthSession,
+    cookies: Cookies,
+    Extension(policy): Extension<SessionPolicy>,
     CurrentUser(user): CurrentUser,
 ) -> Result<Response, AppError> {
+    // The guard already requires a recent password confirmation for this route.
     session
         .session
         .cycle_id()
@@ -381,10 +697,35 @@ async fn logout_everywhere(
         .map_err(raw_session_error)?;
     session.login(&user).await.map_err(session_error)?;
 
+    let token = security::new_token();
+    let security = security::fresh_security(&headers, &token);
+    session
+        .session
+        .insert(SECURITY_DATA_KEY, &security)
+        .await
+        .map_err(raw_session_error)?;
+    cookies.add(security::device_cookie(&policy, &token));
+
     let removed = store::delete_sessions_for_user(&db, user.id).await?;
-    tracing::info!(user.id = user.id, removed, "logged out everywhere");
+    tracing::info!(
+        user.id = user.id,
+        removed,
+        ip = %security::request_ip(&headers),
+        ua = %security::request_user_agent(&headers),
+        "logged out everywhere"
+    );
 
     Ok(Redirect::to("/account/password?logged_out=1").into_response())
+}
+
+fn format_unix(ts: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(ts)
+        .ok()
+        .and_then(|dt| {
+            dt.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn render_account_error(user: &User, message: &str) -> Response {
@@ -471,6 +812,9 @@ pub fn routes(db: Db) -> Router {
 pub fn account_routes(db: Db) -> Router {
     Router::new()
         .route("/account/password", get(account_form).post(change_password))
+        .route("/account/reauth", get(reauth_form).post(reauth))
+        .route("/account/sessions", get(sessions_page))
+        .route("/account/sessions/{public_id}/revoke", post(revoke_session))
         .route("/account/logout-everywhere", post(logout_everywhere))
         .route_layer(axum::middleware::from_fn(super::require_auth))
         .with_state(db)
