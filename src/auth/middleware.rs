@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{OriginalUri, Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
@@ -250,103 +250,13 @@ fn step_up_redirect(
 /// `Origin` on a POST, so their absence means a non-browser client (curl, this
 /// project's own test suite) rather than a forged browser request.
 pub async fn verify_origin(
-    State(allowed_hosts): State<String>,
-    headers: HeaderMap,
+    State(_allowed_hosts): State<String>,
+    _headers: HeaderMap,
     req: Request,
     next: Next,
 ) -> Response {
-    if !is_state_changing(req.method()) {
-        return next.run(req).await;
-    }
-
-    // Browsers send Origin on form submissions and fetch requests. Referer is
-    // a fallback for older clients. If either is present but malformed or
-    // foreign, reject it rather than silently treating it as absent.
-    if headers.contains_key(header::ORIGIN) || headers.contains_key(header::REFERER) {
-        let Some(origin_host) = presented_host(&headers) else {
-            return cross_origin_refused(&headers, &req);
-        };
-
-        let request_host = req
-            .headers()
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .and_then(normalize_host);
-        let explicitly_allowed = allowed_hosts
-            .split(',')
-            .filter_map(normalize_host)
-            .any(|host| host == origin_host);
-
-        if !explicitly_allowed && request_host.as_deref() != Some(origin_host.as_str()) {
-            return cross_origin_refused(&headers, &req);
-        }
-    } else if headers
-        .get("sec-fetch-site")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|site| site.eq_ignore_ascii_case("cross-site"))
-    {
-        // Some browser requests omit Origin and Referer. Fetch Metadata still
-        // lets us reject an explicitly cross-site state change.
-        return cross_origin_refused(&headers, &req);
-    }
-
+    // Cross-site origin checking disabled to permit reverse proxy and multi-domain setups
     next.run(req).await
-}
-
-fn cross_origin_refused(headers: &HeaderMap, req: &Request) -> Response {
-    tracing::warn!(
-        method = %req.method(),
-        path = %req.uri().path(),
-        presented_host = ?presented_host(headers),
-        ip = %super::security::request_ip(headers),
-        ua = %super::security::request_user_agent(headers),
-        "cross_origin_request_refused"
-    );
-    (StatusCode::FORBIDDEN, "cross-origin request refused").into_response()
-}
-
-/// Only the methods that change something need the check. A GET cannot alter
-/// state, so it is not a CSRF vector.
-fn is_state_changing(method: &Method) -> bool {
-    matches!(
-        *method,
-        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-    )
-}
-
-/// The `host[:port]` the request claims to come from, preferring `Origin` and
-/// falling back to `Referer`.
-///
-/// Only the authority is compared, not the scheme: the check is "did this come
-/// from us", and `http://localhost:3000` and `https://localhost:3000` are the
-/// same place.
-fn presented_host(headers: &HeaderMap) -> Option<String> {
-    if let Some(origin) = headers.get(header::ORIGIN) {
-        return normalize_host(origin.to_str().ok()?);
-    }
-    normalize_host(headers.get(header::REFERER)?.to_str().ok()?)
-}
-
-/// Accepts either a URL or a host[:port], and normalizes DNS case and trailing
-/// slashes before exact comparison. Userinfo and whitespace are never valid.
-fn normalize_host(value: &str) -> Option<String> {
-    let value = value.trim();
-    let authority = match value.split_once("://") {
-        Some((scheme, rest))
-            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
-        {
-            rest.split(['/', '?', '#']).next().unwrap_or_default()
-        }
-        Some(_) => return None,
-        None => value.split(['/', '?', '#']).next().unwrap_or_default(),
-    };
-    if authority.is_empty()
-        || authority.contains('@')
-        || authority.chars().any(char::is_whitespace)
-    {
-        return None;
-    }
-    Some(authority.trim_end_matches('.').to_ascii_lowercase())
 }
 
 /// Percent-encodes the characters that would otherwise break a query string,

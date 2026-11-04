@@ -1,0 +1,139 @@
+name: Zero-Downtime Blue-Green VPS Deploy
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: Unique lowercase app name (e.g., todo)
+        required: true
+        type: string
+      binary-name:
+        description: Cargo / compiled binary name (e.g., todo)
+        required: true
+        type: string
+      domain:
+        description: Primary public hostname (e.g., todorust.duckdns.org)
+        required: true
+        type: string
+      port-blue:
+        description: Local port for blue slot
+        required: false
+        default: '4001'
+        type: string
+      port-green:
+        description: Local port for green slot
+        required: false
+        default: '4002'
+        type: string
+      health-path:
+        description: Health check endpoint route
+        required: false
+        default: '/healthz'
+        type: string
+      build-css:
+        description: Whether to run npm ci && npm run css:build
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      VPS_HOST:
+        required: true
+      VPS_SSH_PORT:
+        required: true
+      VPS_SSH_KEY:
+        required: true
+      VPS_KNOWN_HOSTS:
+        required: true
+      # APP_ENV: Multi-line string with all runtime secrets (e.g. SESSION_SECRET=xxx)
+      APP_ENV:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: deploy-${{ inputs.app-name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache dependencies and Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CSS Assets
+        if: ${{ inputs.build-css }}
+        run: |
+          npm ci
+          npm run css:build
+
+      - name: Compile Release Binary
+        run: |
+          cargo build --release --locked --bin "${{ inputs.binary-name }}"
+          test -s "target/release/${{ inputs.binary-name }}"
+
+      - name: Setup SSH Connection
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Ship Artifacts & Secrets to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          APP_NAME: ${{ inputs.app-name }}
+          BINARY_NAME: ${{ inputs.binary-name }}
+          APP_ENV: ${{ secrets.APP_ENV }}
+        run: |
+          SSH_CMD="ssh -p ${VPS_SSH_PORT} -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes deploy@${VPS_HOST}"
+          
+          # Create remote application directories
+          $SSH_CMD "mkdir -p /opt/apps/${APP_NAME}/bin /opt/apps/${APP_NAME}/shared"
+          
+          # 1. Sync the compiled binary using atomic replacement (prevents ETXTBSY)
+          scp -P "${VPS_SSH_PORT}" -i ~/.ssh/id_ed25519 "target/release/${BINARY_NAME}" "deploy@${VPS_HOST}:/opt/apps/${APP_NAME}/bin/${APP_NAME}.new"
+          $SSH_CMD "chmod +x /opt/apps/${APP_NAME}/bin/${APP_NAME}.new && mv -f /opt/apps/${APP_NAME}/bin/${APP_NAME}.new /opt/apps/${APP_NAME}/bin/${APP_NAME}"
+
+          # 2. Sync the blue-green switch script
+          scp -P "${VPS_SSH_PORT}" -i ~/.ssh/id_ed25519 "deploy/switch.sh" "deploy@${VPS_HOST}:/opt/apps/${APP_NAME}/bin/switch.sh"
+          $SSH_CMD "chmod +x /opt/apps/${APP_NAME}/bin/switch.sh"
+
+          # 3. Securely transmit environment secrets directly over encrypted SSH
+          if [ -n "$APP_ENV" ]; then
+            printf '%s\n' "$APP_ENV" | $SSH_CMD "cat > /opt/apps/${APP_NAME}/shared/.env && chmod 600 /opt/apps/${APP_NAME}/shared/.env"
+            echo "✅ Runtime secrets synced securely to VPS"
+          fi
+
+      - name: Execute Blue-Green Switch
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          APP_NAME: ${{ inputs.app-name }}
+          PORT_BLUE: ${{ inputs.port-blue }}
+          PORT_GREEN: ${{ inputs.port-green }}
+          HEALTH_PATH: ${{ inputs.health-path }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          ssh -p "${VPS_SSH_PORT}" -i ~/.ssh/id_ed25519 deploy@${VPS_HOST} \
+            "/opt/apps/${APP_NAME}/bin/switch.sh '${APP_NAME}' '${PORT_BLUE}' '${PORT_GREEN}' '${HEALTH_PATH}' '${DOMAIN}'"
+
+      - name: Verify Public Domain Response
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          HEALTH_PATH: ${{ inputs.health-path }}
+        run: |
+          echo "Verifying public endpoint https://${DOMAIN}${HEALTH_PATH}..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${DOMAIN}${HEALTH_PATH}" || echo "000")
+          echo "Public status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Notice: Public endpoint returned $STATUS (external DNS or proxy may still be routing)."
+          fi

@@ -1,8 +1,8 @@
-name: deploy
+name: Deploy to Production
 
 on:
   push:
-    branches: [master, main]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -10,11 +10,18 @@ permissions:
 
 jobs:
   deploy:
-    uses: ./.github/workflows/piku-rust-deploy.yml
+    uses: ./.github/workflows/deploy-zero-downtime.yml
     with:
       app-name: todo
       binary-name: todo
       domain: todorust.duckdns.org
-      additional-domains: qp90t.aiccloud.online
+      port-blue: '4001'
+      port-green: '4002'
+      health-path: '/healthz'
       build-css: true
-    secrets: inherit
+    secrets:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      APP_ENV: ${{ secrets.APP_ENV }}
