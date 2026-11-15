@@ -1,0 +1,20 @@
+# App manifest — the deploy pipeline reads this.
+# Adding a new app = create apps/<name>/app.toml + Dockerfile.
+
+[app]
+name        = "todo"
+domain      = "todorust.duckdns.org"
+extra_domains = ["qp90t.aiccloud.online"]
+health_path = "/healthz"
+port_blue   = 4001
+port_green  = 4002
+
+[resources]
+memory_limit = "128m"     # Axum container
+tb_memory_limit = "96m"   # TrailBase sidecar
+
+[trailbase]
+enabled  = true
+port     = 4010            # internal, exposed only to Caddy
+version  = "0.2.6"
+

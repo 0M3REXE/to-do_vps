@@ -1,27 +1,145 @@
-name: Deploy to Production
+name: Monorepo Zero-Downtime Deployment
 
 on:
   push:
     branches: [main, master]
+    paths:
+      - 'apps/**'
+      - 'src/**'
+      - 'templates/**'
+      - 'static/**'
+      - 'migrations/**'
+      - 'Cargo.*'
+      - 'package*.json'
+      - '.github/workflows/deploy.yml'
+      - 'deploy/**'
   workflow_dispatch:
+    inputs:
+      app:
+        description: 'Specific app directory to deploy (or "all")'
+        required: true
+        default: 'todo'
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  deploy:
-    uses: ./.github/workflows/deploy-zero-downtime.yml
-    with:
-      app-name: todo
-      binary-name: todo
-      domain: todorust.duckdns.org
-      port-blue: '4001'
-      port-green: '4002'
-      health-path: '/healthz'
-      build-css: true
-    secrets:
-      VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
-      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-      APP_ENV: ${{ secrets.APP_ENV }}
+  detect-apps:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.find-apps.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine target apps
+        id: find-apps
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.app }}" != "all" ]; then
+            echo "matrix=[\"${{ github.event.inputs.app }}\"]" >> "$GITHUB_OUTPUT"
+          else
+            APPS=$(find apps -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | jq -R -s -c 'split("\n")[:-1]')
+            echo "matrix=${APPS}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-and-deploy:
+    needs: detect-apps
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-apps.outputs.matrix) }}
+      fail-fast: false
+    concurrency:
+      group: deploy-${{ matrix.app }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${REPO_LOWER}/${{ matrix.app }}"
+          TAG="${{ github.sha }}"
+          SHORT_TAG="${TAG:0:7}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "full_ref=${IMAGE}:${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/${{ matrix.app }}/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Setup SSH agent and pinned host key
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          APP: ${{ matrix.app }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          APP_ENV: ${{ secrets.APP_ENV }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SSH="ssh -p ${VPS_SSH_PORT} -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes deploy@${VPS_HOST}"
+
+          # Ensure app directory layout
+          $SSH "mkdir -p /opt/apps/${APP}/shared /opt/apps/${APP}/traildepot"
+
+          # Sync app manifest and deploy runner script
+          scp -P "${VPS_SSH_PORT}" -i ~/.ssh/id_ed25519 "apps/${APP}/app.toml" "deploy@${VPS_HOST}:/opt/apps/${APP}/app.toml"
+          scp -P "${VPS_SSH_PORT}" -i ~/.ssh/id_ed25519 "deploy/deploy.sh" "deploy@${VPS_HOST}:/opt/apps/${APP}/deploy.sh"
+          $SSH "chmod +x /opt/apps/${APP}/deploy.sh"
+
+          # Securely stream runtime secrets without writing them to disk in CI
+          if [ -n "$APP_ENV" ]; then
+            printf '%s\n' "$APP_ENV" | $SSH "cat > /opt/apps/${APP}/shared/.env && chmod 600 /opt/apps/${APP}/shared/.env"
+            echo "Secrets successfully synchronized."
+          fi
+
+          # Authenticate rootless Podman with GHCR to pull packages
+          $SSH "echo '${GITHUB_TOKEN}' | podman login ghcr.io -u '${GITHUB_ACTOR}' --password-stdin 2>/dev/null || true"
+
+          # Execute atomic zero-downtime deploy
+          $SSH "/opt/apps/${APP}/deploy.sh '${APP}' '${IMAGE}' '${TAG}'"
+
+      - name: Verify Public Domain
+        run: |
+          echo "Verifying public HTTPS endpoint..."
+          sleep 2
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://todorust.duckdns.org/healthz" || echo "000")
+          echo "Public status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Warning: Public health check returned $STATUS"
+          fi
